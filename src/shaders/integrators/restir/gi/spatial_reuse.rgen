@@ -7,6 +7,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 
 #include "restirgi_commons.h"
 #include "../../../commons.glsl"
@@ -24,7 +26,7 @@ void combine_reservoir(inout Reservoir r1, const Reservoir r2,
                        out bool gt) {
 
     const uint r2_m = min(r2.m, M_MAX);
-    float r2_hat = p_hat(r2.s.L_o);
+    float r2_hat = p_hat(vec3(r2.s.L_o));
     // // Check visibility
     any_hit_payload.hit = 1;
     vec3 wi = r2.s.x_s - q.x_v;
@@ -38,7 +40,7 @@ void combine_reservoir(inout Reservoir r1, const Reservoir r2,
                     0xFF, 1, 0, 1, q.x_v, 0, wi, wi_len, 1);
         visible = any_hit_payload.hit == 0;
     } else {
-        visible = q.p_q > 0;
+        visible = q.p_q > 0.0;
     }
 
     if (!visible) {
@@ -53,12 +55,13 @@ void combine_reservoir(inout Reservoir r1, const Reservoir r2,
         w_rq /= w_rq_len;
         const float qq = w_qq_len * w_qq_len;
         const float rq = w_rq_len * w_rq_len;
-        const float div = rq * abs(dot(w_qq, q.n_s));
-        const float j = div == 0 ? 0 : abs(dot(w_rq, q.n_s)) * qq / div;
+        const float div = rq * abs(dot(w_qq, vec3(q.n_s)));
+        const float j = div == 0 ?
+                0 : abs(dot(w_rq, vec3(q.n_s))) * qq / div;
         r2_hat *= j;
     }
 
-    const float factor = r2_hat * r2_m * r2.W;
+    const float factor = r2_hat * float(r2_m) * float(r2.W);
     gt = factor > 0;
     if (factor > 0) {
         update_reservoir(r1, r2.s, factor);
@@ -88,10 +91,10 @@ void main() {
 
     Reservoir r;
     r.w_sum = 0;
-    r.W = 0;
+    r.W = float16_t(0.0); // [FIX] 賦值修正
     r.m = 0;
-    const float factor =
-        pc.do_spatiotemporal == 0 ? 0 : r_s.m * r_s.W * p_hat(r_s.s.L_o);
+    const float factor = pc.do_spatiotemporal == 0 ?
+        0.0 : float(r_s.m) * float(r_s.W) * p_hat(vec3(r_s.s.L_o));
     if (factor > 0) {
         update_reservoir(r, r_s.s, factor);
     }
@@ -110,13 +113,13 @@ void main() {
         const uint coords_idx = coords.x * pc.size_y + coords.y;
 
         q_n = samples.d[coords_idx];
-        if (length(q_n.n_s) == 0) {
+        if (length(q_n.n_s) == float16_t(0.0)) {
             continue;
         }
         // Geometric similarity
         float dist = dot(q_n.x_v - q.x_v, q_n.x_v - q.x_v);
         if (dist > dist_threshold ||
-            (dot(q_n.n_v, q.n_v)) < cos(angle_threshold)) {
+            (dot(vec3(q_n.n_v), vec3(q.n_v))) < cos(angle_threshold)) {
             continue;
         }
         Reservoir r_n = temp_reservoirs.d[offset(pingpong ^ 1) + coords_idx];
@@ -152,7 +155,9 @@ void main() {
     }
 
     r.m = min(sum, M_MAX);
-    r.W = Z * phat_val == 0 ? 0 : r.w_sum / (Z * phat_val);
+    r.W = (float(Z) * phat_val == 0.0) ? 
+           float16_t(0.0) : 
+           float16_t(r.w_sum / (float(Z) * phat_val));
 #define sr spatial_reservoirs.d[offset(pingpong) + pixel_idx]
     sr.w_sum = r.w_sum;
     sr.W = r.W;

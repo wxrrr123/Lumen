@@ -7,6 +7,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 
 #include "restirgi_commons.h"
 #include "../../../commons.glsl"
@@ -26,7 +28,7 @@ void main() {
     const vec2 pixel = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
     const ReservoirSample s = samples.d[pixel_idx];
     Reservoir r;
-    if (length(s.n_s) == 0) {
+    if (length(vec3(s.n_s)) == 0.0) {
         init_reservoir(r);
         tr.w_sum = r.w_sum;
         tr.W = r.W;
@@ -64,28 +66,37 @@ void main() {
     }
     Reservoir r_new;
     r_new.w_sum = 0;
-    r_new.W = 0;
+    r_new.W = float16_t(0.0); // [FIX] 賦值修正
     r_new.m = 0;
-    const float phat = p_hat(s.L_o);
-    const float w = phat / s.p_q;
+    const float phat = p_hat(vec3(s.L_o)); // [FIX] p_hat 輸入改 vec3
+    const float w = phat / float(s.p_q);   // [FIX] p_q 轉 float
     update_reservoir(r_new, s, w);
-    r_new.W = phat == 0 ? 0 : r_new.w_sum / (r_new.m * phat);
+
+    // [FIX] 計算 W 時，要把所有變數轉成 float 計算，最後再轉回 float16_t
+    r_new.W = phat == 0 ? float16_t(0.0) : float16_t(r_new.w_sum / (float(r_new.m) * phat));
 
     Reservoir r_t;
     r_t.w_sum = 0;
-    r_t.W = 0;
+    r_t.W = float16_t(0.0); // [FIX] 賦值修正
     r_t.m = 0;
+
+    // [FIX] 混合乘法修正： uint * float16 * float -> 全轉 float
     // Combine new
-    update_reservoir(r_t, r_new.s, r_new.m * r_new.W * phat);
-    // Combine previous
-    update_reservoir(r_t, r.s, r.m * r.W * p_hat(r.s.L_o));
+    update_reservoir(r_t, r_new.s, float(r_new.m) * float(r_new.W) * phat);
+    // Combine previous (注意 p_hat 輸入要轉 vec3)
+    update_reservoir(r_t, r.s, float(r.m) * float(r.W) * p_hat(vec3(r.s.L_o)));
+
     uint mval = r.m;
-    const float new_phat = p_hat(r_t.s.L_o);
+    const float new_phat = p_hat(vec3(r_t.s.L_o)); // [FIX] 輸入轉 vec3
     if (new_phat > 0) {
         mval++;
     }
     r_t.m = min(r.m + 1, M_MAX);
-    r_t.W = new_phat * mval == 0 ? 0 : r_t.w_sum / (mval * new_phat);
+    
+    // [FIX] 最終 W 計算
+    r_t.W = (new_phat * float(mval) == 0.0) ? 
+             float16_t(0.0) : 
+             float16_t(r_t.w_sum / (float(mval) * new_phat));
 
     tr.w_sum = r_t.w_sum;
     tr.W = r_t.W;

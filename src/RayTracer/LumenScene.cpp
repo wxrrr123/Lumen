@@ -25,6 +25,8 @@
 #include "shaders/commons.h"
 #include <cctype>
 #include "Framework/PersistentResourceManager.h"
+#include <iostream>
+#include <cstdio>
 
 static bool ends_with(const std::string& str, const std::string& end) {
 	if (end.size() > str.size()) return false;
@@ -226,6 +228,30 @@ void LumenScene::load_scene(const std::string& path) {
 		vk::ShaderMacro("ENABLE_CONDUCTOR", has_bsdf_type(BSDF_TYPE_CONDUCTOR), /* visible = */ false));
 	vk::render_graph()->global_macro_defines.push_back(
 		vk::ShaderMacro("ENABLE_PRINCIPLED", has_bsdf_type(BSDF_TYPE_PRINCIPLED), /* visible = */ false));
+
+	uint32_t width = Window::width();
+    uint32_t height = Window::height();
+    uint32_t total_pixels = width * height;
+
+    uint32_t max_depth = config.get()->path_length;
+
+    // 3. 計算理論光線數 (Theoretical Ray Count)
+    // 公式：Pixel數 * (1條主光線 + Depth * (1條反射 + 1條陰影))
+    // 註：這是一個 "Upper Bound" (上限估計)，實際可能會因為光線射向天空提早結束而變少
+    uint64_t est_rays_per_frame = (uint64_t)total_pixels * (1 + max_depth * 2);
+
+    std::cout << "========= Performance Metrics Info =========" << std::endl;
+    std::cout << "Resolution:      " << width << " x " << height << std::endl;
+    std::cout << "Total Pixels:    " << total_pixels << std::endl;
+    std::cout << "Max Path Depth:  " << max_depth << " bounces" << std::endl;
+    std::cout << "--------------------------------------------" << std::endl;
+    std::cout << "Est. Rays/Frame: " << est_rays_per_frame << " (approx)" << std::endl;
+    std::cout << "============================================" << std::endl;
+
+	std::cout << "========= Scene Light Statistics =========" << std::endl;
+	std::cout << "Total Emissive Triangles (Primitives): " << total_light_triangle_cnt << std::endl;
+	std::cout << "Total Light Area: " << total_light_area << std::endl;
+	std::cout << "==========================================" << std::endl;
 }
 
 void LumenScene::load_lumen_scene(const std::string& path) {
@@ -516,7 +542,12 @@ void LumenScene::load_mitsuba_scene(const std::string& path) {
 	MitsubaParser mitsuba_parser;
 	mitsuba_parser.parse(path);
 
-	create_scene_config(mitsuba_parser.integrator.type);
+    // =========================================================
+    // [FIX] 1. 強制設定 Integrator 為 "restirgi"
+    // =========================================================
+    // 這樣才會建立 ReSTIRConfig，並分配正確的緩衝區 (Reservoirs)
+    std::cout << ">>> [HACK] Forcing Integrator Type to: RESTIRGI" << std::endl;
+    create_scene_config("restirgi"); 
 
 	SceneConfig* curr_config = config.get();
 
@@ -598,95 +629,77 @@ void LumenScene::load_mitsuba_scene(const std::string& path) {
 		i++;
 	}
 
-	auto make_default_principled = [](Material& m) {
-		m.metallic = 0;
-		m.specular_tint = 0;
-		m.sheen_tint = 0.0;
-		m.clearcoat = 0;
-		m.clearcoat_gloss = 0;
-		m.subsurface = 0;
-		m.sheen = 0;
-		m.thin = 0;
-	};
-	i = 0;
-	materials.resize(mitsuba_parser.bsdfs.size());
-	for (const auto& m_bsdf : mitsuba_parser.bsdfs) {
-		if (m_bsdf.texture != "") {
-			textures.push_back(root + m_bsdf.texture);
-			materials[i].texture_id = (int)textures.size() - 1;
-		} else {
-			materials[i].texture_id = -1;
-		}
-		Material& mat = materials[i];
-		make_default_principled(mat);
-		mat.albedo = m_bsdf.albedo;
-		mat.roughness = m_bsdf.roughness;
-		// Assume Principled for other materials for now
-		if (m_bsdf.type == "diffuse") {
-			bsdf_types |= BSDF_TYPE_DIFFUSE;
-			mat.bsdf_type = BSDF_TYPE_DIFFUSE;
-			mat.bsdf_props = BSDF_FLAG_DIFFUSE_REFLECTION;
-		} else if (m_bsdf.type == "roughplastic" || m_bsdf.type == "roughdielectric" || m_bsdf.type == "dielectric" ||
-				   m_bsdf.type == "plastic") {
-			bsdf_types |= BSDF_TYPE_PRINCIPLED;
-			mat.bsdf_type = BSDF_TYPE_PRINCIPLED;
-			mat.ior = m_bsdf.ior;
-			if (mat.roughness < 1.0) {
-				mat.bsdf_props |= BSDF_FLAG_DIFFUSE_REFLECTION;
-			}
-			if (mat.ior != 1.0) {
-				mat.bsdf_props |= BSDF_FLAG_TRANSMISSION;
-			}
-			if (mat.roughness > 0.08) {
-				mat.bsdf_props |= BSDF_FLAG_GLOSSY;
-			} else {
-				mat.bsdf_props |= BSDF_FLAG_SPECULAR;
-			}
-			if (m_bsdf.type == "roughdielectric" || m_bsdf.type == "dielectric") {
-				mat.spec_trans = 1.0;
-				mat.metallic = 0.0;
-			}
-			if (m_bsdf.type == "roughplastic" || m_bsdf.type == "plastic") {
-				// The roughplastic in Mitsuba is not compatible with the Disney principled model
-				mat.metallic = 1.0;
-				mat.subsurface = 0.1f;
-				mat.spec_trans = 0.5;
-				mat.thin = 1;
-			}
+    auto make_default_principled = [](Material& m) {
+        m.metallic = 0; m.emissive_factor = glm::vec3(0); 
+    };
+    i = 0;
+    materials.resize(mitsuba_parser.bsdfs.size());
+    
+    std::cout << "--- [DEBUG] Loading Materials & Applying Hacks ---" << std::endl;
+    
+    for (const auto& m_bsdf : mitsuba_parser.bsdfs) {
+        if (m_bsdf.texture != "") {
+            textures.push_back(root + m_bsdf.texture);
+            materials[i].texture_id = (int)textures.size() - 1;
+        } else {
+            materials[i].texture_id = -1;
+        }
+        Material& mat = materials[i];
+        make_default_principled(mat);
+        mat.albedo = m_bsdf.albedo;
+        mat.roughness = m_bsdf.roughness;
 
-		} else if (m_bsdf.type == "conductor" || m_bsdf.type == "roughconductor") {
-			bsdf_types |= BSDF_TYPE_CONDUCTOR;
-			mat.bsdf_type = BSDF_TYPE_CONDUCTOR;
-			reflectance_to_conductor_eta_k(m_bsdf.albedo, mat.albedo, mat.k);
-			mat.bsdf_props = BSDF_FLAG_REFLECTION;
-			if (mat.roughness > 0.08) {
-				mat.bsdf_props |= BSDF_FLAG_GLOSSY;
-			} else {
-				mat.bsdf_props |= BSDF_FLAG_SPECULAR;
-			}
-		} else if (m_bsdf.type == "glass") {
-			bsdf_types |= BSDF_TYPE_GLASS;
-			mat.bsdf_type = BSDF_TYPE_GLASS;
-			mat.bsdf_props = BSDF_FLAG_SPECULAR_TRANSMISSION;
-			mat.ior = m_bsdf.ior;
-		}
-		i++;
-	}
-	compute_scene_dimensions();
-	// Light
-	i = 0;
-	lights.resize(mitsuba_parser.lights.size());
-	for (auto& light : mitsuba_parser.lights) {
-		lights[i].L = 100.0f * light.L;
-		if (light.type == "directional") {
-			lights[i].pos = light.from;
-			lights[i].to = light.to;
-			lights[i].light_flags = LIGHT_DIRECTIONAL;
-			// Is delta
-			lights[i].light_flags |= 1 << 5;
-		}
-		i++;
-	}
+        // =========================================================
+        // [FIX] 2. 燈管材質 Hack (強度 20)
+        // =========================================================
+        bool is_tube = (std::abs(mat.albedo.x - 0.6478f) < 0.001f); 
+        if (is_tube && std::abs(mat.albedo.x - mat.albedo.y) < 0.001f) {
+            std::cout << ">>> [HACK] TUBE FOUND! Turning Material [" << i << "] into Light Source!" << std::endl;
+            mat.emissive_factor = glm::vec3(20.0f, 20.0f, 20.0f); 
+        }
+        
+        // 設定 BSDF 屬性...
+        if (m_bsdf.type == "diffuse") {
+            bsdf_types |= BSDF_TYPE_DIFFUSE; mat.bsdf_type = BSDF_TYPE_DIFFUSE; mat.bsdf_props = BSDF_FLAG_DIFFUSE_REFLECTION;
+        } else if (m_bsdf.type == "roughplastic" || m_bsdf.type == "roughdielectric" || m_bsdf.type == "dielectric" || m_bsdf.type == "plastic") {
+            bsdf_types |= BSDF_TYPE_PRINCIPLED; mat.bsdf_type = BSDF_TYPE_PRINCIPLED; mat.ior = m_bsdf.ior;
+            if (mat.roughness < 1.0) mat.bsdf_props |= BSDF_FLAG_DIFFUSE_REFLECTION;
+            if (mat.ior != 1.0) mat.bsdf_props |= BSDF_FLAG_TRANSMISSION;
+            if (mat.roughness > 0.08) mat.bsdf_props |= BSDF_FLAG_GLOSSY; else mat.bsdf_props |= BSDF_FLAG_SPECULAR;
+            if (m_bsdf.type == "roughdielectric" || m_bsdf.type == "dielectric") { mat.spec_trans = 1.0; mat.metallic = 0.0; }
+            if (m_bsdf.type == "roughplastic" || m_bsdf.type == "plastic") { mat.metallic = 1.0; mat.subsurface = 0.1f; mat.spec_trans = 0.5; mat.thin = 1; }
+        } else if (m_bsdf.type == "conductor" || m_bsdf.type == "roughconductor") {
+            bsdf_types |= BSDF_TYPE_CONDUCTOR; mat.bsdf_type = BSDF_TYPE_CONDUCTOR;
+            reflectance_to_conductor_eta_k(m_bsdf.albedo, mat.albedo, mat.k);
+            mat.bsdf_props = BSDF_FLAG_REFLECTION;
+            if (mat.roughness > 0.08) mat.bsdf_props |= BSDF_FLAG_GLOSSY; else mat.bsdf_props |= BSDF_FLAG_SPECULAR;
+        } else if (m_bsdf.type == "glass") {
+            bsdf_types |= BSDF_TYPE_GLASS; mat.bsdf_type = BSDF_TYPE_GLASS; mat.bsdf_props = BSDF_FLAG_SPECULAR_TRANSMISSION; mat.ior = m_bsdf.ior;
+        }
+        i++;
+    }
+    compute_scene_dimensions();
+    
+    // =========================================================
+    // [FIX] 3. 燈光過濾 (跳過太陽，只留燈管)
+    // =========================================================
+    i = 0;
+    lights.resize(0); 
+    for (auto& light : mitsuba_parser.lights) {
+        if (light.type == "directional" || light.type == "sunsky") {
+            std::cout << ">>> [DEBUG] Skipping SunSky/Directional light." << std::endl;
+            continue; 
+        }
+        // Classroom 通常只有 Sunsky，所以這邊基本上會清空 lights vector
+        // 但因為上面的材質 Hack，gpu_lights 還是會有燈管資料
+        lights.emplace_back(); 
+        auto& l = lights.back();
+        l.L = 100.0f * light.L;
+        l.pos = light.from;
+        l.to = light.to;
+        l.light_flags = LIGHT_SPOT;
+        i++;
+    }
 }
 
 void LumenScene::add_default_texture() {

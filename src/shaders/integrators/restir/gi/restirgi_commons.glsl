@@ -1,3 +1,6 @@
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
 layout(push_constant) uniform _PushConstantRay { PCReSTIRGI pc; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer RestirSamples { ReservoirSample d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer Reservoirs { Reservoir d[]; };
@@ -12,17 +15,17 @@ const float tmax = 10000.0;
 
 void init_s(out ReservoirSample s) {
     s.x_v = vec3(0);
-    s.n_v = vec3(0);
+    s.n_v = f16vec3(0);     // [FIX] 顯式建構
     s.x_s = vec3(0);
-    s.n_s = vec3(0);
-    s.L_o = vec3(0);
-    s.f = vec3(0);
-    s.p_q = 0;
+    s.n_s = f16vec3(0);     // [FIX] 顯式建構
+    s.L_o = f16vec3(0);     // [FIX] 顯式建構
+    s.f = f16vec3(0);       // [FIX] 顯式建構
+    s.p_q = float16_t(0.0); // [FIX] 顯式建構, 注意是 0.0 不是 0
 }
 
 void init_reservoir(out Reservoir r) {
     r.w_sum = 0;
-    r.W = 0;
+    r.W = float16_t(0.0);   // [FIX] 顯式建構
     r.m = 0;
     init_s(r.s);
 }
