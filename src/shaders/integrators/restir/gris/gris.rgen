@@ -7,6 +7,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 #define SCENE_TEX_IDX 8
 #include "gris_commons.glsl"
 
@@ -47,7 +49,7 @@ void main() {
 	init_data(reconnection_data);
 	init_data(reservoir.data);
 
-	reconnection_data.rc_wi = vec2(0);
+	reconnection_data.rc_wi = f16vec2(0.0);
 
 	// Throughput after the reconnection vertex
 	vec3 postfix_throughput = vec3(1);
@@ -92,8 +94,8 @@ void main() {
 			}
 			if (connectable_vertex_found) {
 #if STREAMING_MODE == STREAMING_MODE_INDIVIDUAL
-				reconnection_data.rc_Li = postfix_throughput * atmosphere_L;
-				reconnection_data.reservoir_contribution = calc_target_pdf(contribution);
+				reconnection_data.rc_Li = f16vec3(postfix_throughput * atmosphere_L);
+				reconnection_data.reservoir_contribution = float16_t(calc_target_pdf(contribution));
 				reconnection_data.path_flags =
 					(reconnection_data.path_flags & 0xFFFF0000) |
 					pack_path_flags(prefix_depth, depth - prefix_depth, RECONNECTION_TYPE_DEFAULT, false);
@@ -143,7 +145,7 @@ void main() {
 		if (connectable_this_vertex) {
 			vec2 rc_barycentrics = payload.attribs;
 			uvec2 rc_primitive_instance_id = uvec2(payload.triangle_idx, payload.instance_idx);
-			reconnection_data.rc_barycentrics = rc_barycentrics;
+			reconnection_data.rc_barycentrics = f16vec2(rc_barycentrics);
 			reconnection_data.rc_primitive_instance_id = rc_primitive_instance_id;
 			reconnection_data.rc_coords = rc_coords;
 #if DEBUG == 1
@@ -161,7 +163,7 @@ void main() {
 			throughput_until_rc = throughput;
 #endif	// STREAMING_MODE == STREAMING_MODE_SPLIT
 			vec3 to_prev = origin.xyz - gbuffer.pos;
-			reconnection_data.rc_partial_jacobian = abs(dot(n_s, wo)) * rc_partial_jacobian / dot(to_prev, to_prev);
+			reconnection_data.rc_partial_jacobian = float16_t(abs(dot(n_s, wo)) * rc_partial_jacobian / dot(to_prev, to_prev));
 		}
 
 		connectable = !connectable_vertex_found && curr_rough;
@@ -169,7 +171,7 @@ void main() {
 		if (depth == 0) {
 			// Fill in GBuffer
 			direct_lighting += throughput * hit_mat.emissive_factor;
-			gbuffer_out.barycentrics = payload.attribs;
+			gbuffer_out.barycentrics = f16vec2(payload.attribs);
 			gbuffer_out.primitive_instance_id = uvec2(payload.triangle_idx, payload.instance_idx);
 		} else {
 			float mis_weight = 1.0;
@@ -185,14 +187,14 @@ void main() {
 				// Stream in the emissive contribution
 				// If the previous vertex was the connection vertex, delay MIS computation to the shifting phase
 				vec3 partial_contrib_for_rc = (was_connectable ? hit_mat.emissive_factor : partial_contrib);
-				reconnection_data.rc_Li = postfix_throughput * partial_contrib_for_rc;
+				reconnection_data.rc_Li = f16vec3(postfix_throughput * partial_contrib_for_rc);
 
 				vec3 contrib = partial_contrib_for_rc * throughput;
 				if (was_connectable) {
 					contrib *= mis_weight;
 					reconnection_data.rc_seed = floatBitsToUint(pdf_light_w);
 				}
-				reconnection_data.reservoir_contribution = calc_target_pdf(contrib);
+				reconnection_data.reservoir_contribution = float16_t(calc_target_pdf(contrib));
 				reconnection_data.path_flags =
 					(reconnection_data.path_flags & 0xFFFF0000) |
 					pack_path_flags(prefix_depth, depth - prefix_depth,
@@ -230,8 +232,8 @@ void main() {
 			sample_bsdf(n_s, wo, hit_mat, 1 /*radiance=cam*/, side, direction, bsdf_pdf_val, cos_theta, sampling_seed);
 
 		if (connectable_this_vertex) {
-			reconnection_data.rc_partial_jacobian *= bsdf_pdf_val;
-			reconnection_data.rc_wi = to_spherical(direction);
+			reconnection_data.rc_partial_jacobian *= float16_t(bsdf_pdf_val);
+			reconnection_data.rc_wi = f16vec2(to_spherical(direction));
 		}
 
 		// NEE
@@ -241,11 +243,13 @@ void main() {
 			bool is_directional_light;
 			LightRecord light_record;
 
+			vec3 tmp_rc_Li;
 			vec3 Le;
 			vec3 nee_wi;
 			float nee_pdf_light_w;
-			vec3 Li = do_nee(seed, gbuffer.pos, hit_mat, side, n_s, wo, light_record, reconnection_data.rc_Li,
+			vec3 Li = do_nee(seed, gbuffer.pos, hit_mat, side, n_s, wo, light_record, tmp_rc_Li,
 							 is_directional_light, Le, nee_wi, nee_pdf_light_w);
+			reconnection_data.rc_Li = f16vec3(tmp_rc_Li);
 			vec3 contribution = Li * throughput;
 			// At 0 depth, we let ReSTIR DI handle the direct lighting
 			bool nee_connectable = depth > 0 && connectable;
@@ -254,8 +258,8 @@ void main() {
 			if (nee_connectable && any(greaterThan(Li, vec3(0)))) {
 				reconnection_data.rc_coords = rc_coords;
 				// reconnection_data.rc_partial_jacobian = rc_partial_jacobian;
-				reconnection_data.rc_partial_jacobian = 1;
-				reconnection_data.rc_barycentrics = light_record.bary;
+				reconnection_data.rc_partial_jacobian = float16_t(1);
+				reconnection_data.rc_barycentrics = f16vec2(light_record.bary);
 				reconnection_data.rc_primitive_instance_id = uvec2(light_record.triangle_idx, light_record.light_idx);
 #if DEBUG == 1
 				reconnection_data.debug_seed = debug_seed;
@@ -263,7 +267,7 @@ void main() {
 				reconnection_data.debug_sampling_seed.w -= 3;
 #endif
 				reconnection_data.rc_seed = rc_seed;
-				reconnection_data.reservoir_contribution = calc_target_pdf(contribution);
+				reconnection_data.reservoir_contribution = float16_t(calc_target_pdf(contribution));
 				reconnection_data.path_flags = (reconnection_data.path_flags & 0xFFFF0000) |
 											   pack_path_flags(depth, 1, RECONNECTION_TYPE_NEE, side) |
 											   uint(is_directional_light) << 14;
@@ -283,8 +287,8 @@ void main() {
 				}
 
 			} else if (connectable_vertex_found) {
-				reconnection_data.rc_Li = postfix_throughput * Li;
-				reconnection_data.reservoir_contribution = calc_target_pdf(contribution);
+				reconnection_data.rc_Li = f16vec3(postfix_throughput * Li);
+				reconnection_data.reservoir_contribution = float16_t(calc_target_pdf(contribution));
 				reconnection_data.path_flags =
 					(reconnection_data.path_flags & 0xFFFF0000) |
 					pack_path_flags(prefix_depth, depth - prefix_depth + 1, RECONNECTION_TYPE_DEFAULT, side);
@@ -295,12 +299,12 @@ void main() {
 				}
 				if (merged && connectable_this_vertex) {
 					ASSERT(postfix_throughput == vec3(1));
-					reservoir.data.rc_wi = to_spherical(nee_wi);
-					reservoir.data.rc_Li = Le;
+					reservoir.data.rc_wi = f16vec2(to_spherical(nee_wi));
+					reservoir.data.rc_Li = f16vec3(Le);
 					reservoir.data.path_flags = (reservoir.data.path_flags & ~0x7u) | RECONNECTION_TYPE_NEE_AFTER_RC;
 					reservoir.data.rc_seed = floatBitsToUint(nee_pdf_light_w);
 					if (bsdf_pdf_val != 0) {
-						reservoir.data.rc_partial_jacobian /= bsdf_pdf_val;
+						reservoir.data.rc_partial_jacobian /= float16_t(bsdf_pdf_val);
 					}
 				}
 #if STREAMING_MODE == STREAMING_MODE_SPLIT
@@ -400,7 +404,7 @@ void main() {
 	if (pc.enable_gris == 1) {
 		ASSERT(reservoir.w_sum >= reservoir.target_pdf);
 		// The samples are additive, therefore set M to 1
-		reservoir.M = 1;
+		reservoir.M = float16_t(1);
 		calc_reservoir_W(reservoir);
 		prefix_contributions.d[pixel_idx] = prefix_col;
 		reservoir.data.seed_helpers = uvec2(pc.general_seed, pc.sampling_seed);

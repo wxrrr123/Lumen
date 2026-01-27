@@ -7,6 +7,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 
 #define SCENE_TEX_IDX 7
 #include "gris_commons.glsl"
@@ -32,8 +34,8 @@ void main() {
 			continue;
 		}
 		ReconnectionData data;
-		data.reservoir_contribution = vec3(0);
-		data.jacobian = 0;
+		data.reservoir_contribution = f16vec3(0.0);
+		data.jacobian = float16_t(0.0);
 		GBuffer neighbor_gbuffer = curr_gbuffers[neighbor_pixel_idx];
 		if (!gbuffer_data_valid(neighbor_gbuffer)) {
 			continue;
@@ -45,9 +47,19 @@ void main() {
 						neighbor_gbuffer.primitive_instance_id.x);
 
 		vec3 primary_direction = get_primary_direction(uvec2(gl_LaunchIDEXT.xy));
+
+		float tmp_jacobian;
+		vec3 tmp_reservoir_contribution;
+		float tmp_new_jacobian;
+
 		retrace_paths(canonical_gbuffer, neighbor_reservoir.data, primary_direction,
-					  neighbor_reservoir.data.rc_partial_jacobian, data.jacobian, data.reservoir_contribution,
-					  data.new_jacobian);
+					  neighbor_reservoir.data.rc_partial_jacobian, tmp_jacobian, tmp_reservoir_contribution,
+					  tmp_new_jacobian);
+
+		data.jacobian = float16_t(tmp_jacobian);
+		data.reservoir_contribution = f16vec3(tmp_reservoir_contribution);
+		data.new_jacobian = float16_t(tmp_new_jacobian);
+
 		reconnection_data[(num_spatial_samples + 1) * pixel_idx + i + 1] = data;
 	}
 }

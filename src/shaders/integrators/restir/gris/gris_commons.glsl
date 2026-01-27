@@ -1,3 +1,6 @@
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
 #include "gris_commons.h"
 #include "../../../commons.glsl"
 layout(location = 0) rayPayloadEXT GrisHitPayload payload;
@@ -198,7 +201,7 @@ vec3 from_spherical(const vec2 v) {
 }
 
 void init_gbuffer(out GBuffer gbuffer) {
-	gbuffer.barycentrics = vec2(0);
+	gbuffer.barycentrics = f16vec2(0);
 	gbuffer.primitive_instance_id = uvec2(-1);
 }
 
@@ -209,10 +212,10 @@ void init_data(out GrisData data) {
 
 void init_reservoir(out Reservoir r) {
 	init_data(r.data);
-	r.M = 0;
-	r.W = 0.0;
-	r.w_sum = 0.0;
-	r.target_pdf = 0.0;
+	r.M = float16_t(0.0);
+	r.W = float16_t(0.0);
+	r.w_sum = float16_t(0.0);
+	r.target_pdf = float16_t(0.0);
 }
 
 bool reservoir_data_valid(in GrisData data) { return data.path_flags != 0; }
@@ -222,10 +225,10 @@ bool gbuffer_data_valid(in GBuffer gbuffer) { return gbuffer.primitive_instance_
 bool update_reservoir(inout uvec4 seed, inout Reservoir r_new, const GrisData data, float target_pdf,
 					  float inv_source_pdf) {
 	float w_i = target_pdf * inv_source_pdf;
-	r_new.w_sum += w_i;
-	if (rand(seed) * r_new.w_sum < w_i) {
+	r_new.w_sum = float16_t(float(r_new.w_sum) + w_i);
+	if (rand(seed) * float(r_new.w_sum) < w_i) {
 		r_new.data = data;
-		r_new.target_pdf = target_pdf;
+		r_new.target_pdf = float16_t(target_pdf);
 		return true;
 	}
 	return false;
@@ -233,7 +236,7 @@ bool update_reservoir(inout uvec4 seed, inout Reservoir r_new, const GrisData da
 
 bool stream_reservoir(inout uvec4 seed, inout Reservoir r_new, const GrisData data, float target_pdf,
 					  float inv_source_pdf) {
-	r_new.M++;
+	r_new.M = float16_t(float(r_new.M) + 1.0);
 	if (target_pdf <= 0.0 || isnan(inv_source_pdf) || inv_source_pdf <= 0.0) {
 		return false;
 	}
@@ -242,8 +245,8 @@ bool stream_reservoir(inout uvec4 seed, inout Reservoir r_new, const GrisData da
 
 bool combine_reservoir(inout uvec4 seed, inout Reservoir target_reservoir, const Reservoir input_reservoir,
 					   float target_pdf, float mis_weight, float jacobian) {
-	target_reservoir.M += input_reservoir.M;
-	float inv_source_pdf = mis_weight * jacobian * input_reservoir.W;
+	target_reservoir.M = float16_t(float(target_reservoir.M) + float(input_reservoir.M));
+	float inv_source_pdf = mis_weight * jacobian * float(input_reservoir.W);
 	if (isnan(inv_source_pdf) || inv_source_pdf == 0.0 || isinf(inv_source_pdf)) {
 		return false;
 	}
@@ -251,11 +254,13 @@ bool combine_reservoir(inout uvec4 seed, inout Reservoir target_reservoir, const
 }
 
 void calc_reservoir_W(inout Reservoir r) {
-	float denom = r.target_pdf * r.M;
-	r.W = denom == 0.0 ? 0.0 : r.w_sum / denom;
+	float denom = float(r.target_pdf) * float(r.M);
+	r.W = float16_t(denom == 0.0 ? 0.0 : float(r.w_sum) / denom);
 }
 
-void calc_reservoir_W_with_mis(inout Reservoir r) { r.W = r.target_pdf == 0.0 ? 0.0 : r.w_sum / r.target_pdf; }
+void calc_reservoir_W_with_mis(inout Reservoir r) {
+	r.W = float16_t(float(r.target_pdf) == 0.0 ? 0.0 : float(r.w_sum) / float(r.target_pdf));
+}
 
 float calc_target_pdf(vec3 f) { return luminance(f); }
 
@@ -558,7 +563,7 @@ bool process_reservoir(inout uvec4 seed, inout Reservoir reservoir, inout float 
 					   in Reservoir source_reservoir, in ReconnectionData data, ivec2 neighbor_coords,
 					   float canonical_in_canonical_pdf, uint num_spatial_samples,
 					   inout vec3 curr_reservoir_contribution) {
-	source_reservoir.M = min(source_reservoir.M, 20);
+	source_reservoir.M = min(source_reservoir.M, float16_t(20.0));
 
 	bool result = false;
 

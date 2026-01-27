@@ -128,6 +128,7 @@ void RayTracer::init_resources() {
 							 .size = Window::width() * Window::height() * 4 * sizeof(float),
 							 .data = data});
 		rt_utils_desc.gt_img_addr = gt_img_buffer->get_device_address();
+		has_gt = true;
 		free(data);
 	}
 
@@ -444,10 +445,12 @@ float RayTracer::draw_frame() {
 	auto now = clock();
 	auto diff = ((float)now - start);
 
-	if (write_exr) {
-		write_exr = false;
+	if (write_exr && integrator->frame_num % 5 == 0 && integrator->frame_num < 500) {
+		// write_exr = false;
+		vkDeviceWaitIdle(vk::context().device);
+		std::string filename = "output/restirpt_output/out_" + std::to_string(integrator->frame_num) + ".exr";
 		ImageUtils::save_exr((float*)vk::map_buffer(output_img_buffer_cpu), Window::width(), Window::height(),
-							 "out.exr");
+							 filename.c_str());
 		vk::unmap_buffer(output_img_buffer_cpu);
 	}
 	bool time_limit = (abs(diff / CLOCKS_PER_SEC - 5)) < 0.1;

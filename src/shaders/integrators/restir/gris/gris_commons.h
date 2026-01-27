@@ -1,9 +1,23 @@
 // #define DISABLE_LOGGING
 #include "../../../commons.h"
 
-#define DEBUG 1
+#define DEBUG 0
 
 NAMESPACE_BEGIN(RestirPT)
+
+#ifdef __cplusplus
+    #include <cstdint>
+
+    using float16_t = uint16_t;
+
+    struct f16vec2 { 
+        uint16_t x, y; 
+    };
+
+    struct f16vec3 { 
+        uint16_t x, y, z; 
+    };
+#endif
 
 struct PCReSTIRPT {
 	vec3 sky_col;
@@ -45,7 +59,7 @@ struct PCReSTIRPT {
 
 
 struct GBuffer {
-	vec2 barycentrics;
+	f16vec2 barycentrics;
 	uvec2 primitive_instance_id;
 };
 
@@ -54,34 +68,34 @@ struct GrisData {
 	uvec4 debug_sampling_seed;
 	uvec4 debug_seed;
 #endif
-	vec3 rc_Li;
-	float reservoir_contribution;
-	vec2 rc_wi;
+	f16vec3 rc_Li;
+	float16_t reservoir_contribution;
+	f16vec2 rc_wi;
 	uint rc_seed;
 	// Layout for the path flags
 	// 1b is_directional_light | 1b side | 5b postfix_length| 5b prefix_length |3b is_nee/is_nee_postfix/emissive_after_rc/emissive/default
 	uint path_flags;
-	vec2 rc_barycentrics;
+	f16vec2 rc_barycentrics;
 	uvec2 seed_helpers;
 	uvec2 rc_primitive_instance_id;
 	uint rc_coords;
-	float rc_partial_jacobian; // g * rc_pdf (* rc_postfix_pdf)
+	float16_t rc_partial_jacobian; // g * rc_pdf (* rc_postfix_pdf)
 };
 
 struct Reservoir {
 	GrisData data;
-	uint M;
-	float W;
-	float w_sum;
-	float target_pdf;
+	float16_t M;
+	float16_t W;
+	float16_t w_sum;
+	float16_t target_pdf;
 };
 
 struct ReconnectionData {
-	vec3 reservoir_contribution;
-	float jacobian;
-	vec2 pad;
-	float new_jacobian;
-	float target_pdf_in_neighbor;
+	f16vec3 reservoir_contribution;
+	float16_t jacobian;
+	// vec2 pad;
+	float16_t new_jacobian;
+	float16_t target_pdf_in_neighbor;
 };
 
 struct GrisHitPayload {

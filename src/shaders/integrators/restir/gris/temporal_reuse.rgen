@@ -7,6 +7,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 
 #define SCENE_TEX_IDX 9
 #include "gris_commons.glsl"
@@ -59,9 +61,9 @@ void main() {
 		GBuffer prev_gbuffer = prev_gbuffers[prev_idx];
 		if (gbuffer_data_valid(prev_gbuffer)) {
 			ReconnectionData data;
-			data.reservoir_contribution = vec3(0);
-			data.jacobian = 0;
-			data.target_pdf_in_neighbor = 0;
+			data.reservoir_contribution = f16vec3(0.0);
+			data.jacobian = float16_t(0.0);
+			data.target_pdf_in_neighbor = float16_t(0.0);
 
 			const Reservoir prev_reservoir = prev_reservoirs[prev_idx];
 			HitData prev_hitdata = get_hitdata(prev_gbuffer.barycentrics, prev_gbuffer.primitive_instance_id.y,
@@ -69,12 +71,23 @@ void main() {
 
 			vec3 primary_direction = get_primary_direction(uvec2(gl_LaunchIDEXT.xy));
 			vec3 prev_primary_direction = get_prev_primary_direction(uvec2(prev_coords));
+
+			float tmp_jacobian;
+			vec3 tmp_reservoir_contribution;
+
 			retrace_paths(canonical_gbuffer, prev_reservoir.data, primary_direction,
-						  prev_reservoir.data.rc_partial_jacobian, data.jacobian, data.reservoir_contribution,
+						  prev_reservoir.data.rc_partial_jacobian, tmp_jacobian, tmp_reservoir_contribution,
 						  new_jacobian);
+			
+			data.jacobian = float16_t(tmp_jacobian);
+			data.reservoir_contribution = f16vec3(tmp_reservoir_contribution);
+
+			float tmp_target_pdf;
 
 			retrace_paths_and_evaluate(prev_hitdata, canonical_reservoir.data, prev_primary_direction,
-									   data.target_pdf_in_neighbor);
+									   tmp_target_pdf);
+
+			data.target_pdf_in_neighbor = float16_t(tmp_target_pdf);									
 
 			prev_accepted = process_reservoir(seed, reservoir, m_c, canonical_reservoir, prev_reservoir, data,
 											  prev_coords, canonical_in_canonical_pdf, 1, curr_reservoir_contribution);
@@ -93,8 +106,8 @@ void main() {
 	calc_reservoir_W_with_mis(reservoir);
 
 	if (prev_accepted && !canonical) {
-		reservoir.data.rc_partial_jacobian = new_jacobian;
-		reservoir.data.reservoir_contribution = calc_target_pdf(curr_reservoir_contribution);
+		reservoir.data.rc_partial_jacobian = float16_t(new_jacobian);
+		reservoir.data.reservoir_contribution = float16_t(target_pdf);
 	}
 
 	curr_reservoirs[pixel_idx] = reservoir;

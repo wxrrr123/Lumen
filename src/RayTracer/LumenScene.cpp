@@ -229,29 +229,26 @@ void LumenScene::load_scene(const std::string& path) {
 	vk::render_graph()->global_macro_defines.push_back(
 		vk::ShaderMacro("ENABLE_PRINCIPLED", has_bsdf_type(BSDF_TYPE_PRINCIPLED), /* visible = */ false));
 
-	uint32_t width = Window::width();
-    uint32_t height = Window::height();
-    uint32_t total_pixels = width * height;
+	// uint32_t width = Window::width();
+    // uint32_t height = Window::height();
+    // uint32_t total_pixels = width * height;
 
-    uint32_t max_depth = config.get()->path_length;
+    // uint32_t max_depth = config.get()->path_length;
 
-    // 3. 計算理論光線數 (Theoretical Ray Count)
-    // 公式：Pixel數 * (1條主光線 + Depth * (1條反射 + 1條陰影))
-    // 註：這是一個 "Upper Bound" (上限估計)，實際可能會因為光線射向天空提早結束而變少
-    uint64_t est_rays_per_frame = (uint64_t)total_pixels * (1 + max_depth * 2);
+    // uint64_t est_rays_per_frame = (uint64_t)total_pixels * (1 + max_depth * 2);
 
-    std::cout << "========= Performance Metrics Info =========" << std::endl;
-    std::cout << "Resolution:      " << width << " x " << height << std::endl;
-    std::cout << "Total Pixels:    " << total_pixels << std::endl;
-    std::cout << "Max Path Depth:  " << max_depth << " bounces" << std::endl;
-    std::cout << "--------------------------------------------" << std::endl;
-    std::cout << "Est. Rays/Frame: " << est_rays_per_frame << " (approx)" << std::endl;
-    std::cout << "============================================" << std::endl;
+    // std::cout << "========= Performance Metrics Info =========" << std::endl;
+    // std::cout << "Resolution:      " << width << " x " << height << std::endl;
+    // std::cout << "Total Pixels:    " << total_pixels << std::endl;
+    // std::cout << "Max Path Depth:  " << max_depth << " bounces" << std::endl;
+    // std::cout << "--------------------------------------------" << std::endl;
+    // std::cout << "Est. Rays/Frame: " << est_rays_per_frame << " (approx)" << std::endl;
+    // std::cout << "============================================" << std::endl;
 
-	std::cout << "========= Scene Light Statistics =========" << std::endl;
-	std::cout << "Total Emissive Triangles (Primitives): " << total_light_triangle_cnt << std::endl;
-	std::cout << "Total Light Area: " << total_light_area << std::endl;
-	std::cout << "==========================================" << std::endl;
+	// std::cout << "========= Scene Light Statistics =========" << std::endl;
+	// std::cout << "Total Emissive Triangles (Primitives): " << total_light_triangle_cnt << std::endl;
+	// std::cout << "Total Light Area: " << total_light_area << std::endl;
+	// std::cout << "==========================================" << std::endl;
 }
 
 void LumenScene::load_lumen_scene(const std::string& path) {
@@ -546,8 +543,8 @@ void LumenScene::load_mitsuba_scene(const std::string& path) {
     // [FIX] 1. 強制設定 Integrator 為 "restirgi"
     // =========================================================
     // 這樣才會建立 ReSTIRConfig，並分配正確的緩衝區 (Reservoirs)
-    std::cout << ">>> [HACK] Forcing Integrator Type to: RESTIRGI" << std::endl;
-    create_scene_config("restirgi"); 
+    std::cout << ">>> [HACK] Forcing Integrator Type to: RESTIRPT" << std::endl;
+    create_scene_config("restirpt"); 
 
 	SceneConfig* curr_config = config.get();
 

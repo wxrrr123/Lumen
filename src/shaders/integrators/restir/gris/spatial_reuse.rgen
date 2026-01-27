@@ -7,6 +7,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 
 #define SCENE_TEX_IDX 10
 #include "gris_commons.glsl"
@@ -106,13 +108,13 @@ vec3 do_spatial_reuse(GBuffer gbuffer, Reservoir reservoir) {
 
 	calc_reservoir_W_with_mis(reservoir);
 #ifdef ENABLE_DEFENSIVE_PAIRWISE_MIS
-	reservoir.W /= (1.0 + num_valid_samples);
+	reservoir.W = float16_t(float(reservoir.W) / (1.0 + num_valid_samples));
 #else
-	reservoir.W /= max(num_valid_samples, 1);
+	reservoir.W = float16_t(float(reservoir.W) / max(num_valid_samples, 1));
 #endif	// ENABLE_DEFENSIVE_PAIRWISE_MIS
 
-	reservoir.data.reservoir_contribution = calc_target_pdf(curr_reservoir_contribution);
-	reservoir.data.rc_partial_jacobian = curr_new_partial_jacobian;
+	reservoir.data.reservoir_contribution = float16_t(calc_target_pdf(curr_reservoir_contribution));
+	reservoir.data.rc_partial_jacobian = float16_t(curr_new_partial_jacobian);
 	out_reservoirs[pixel_idx] = reservoir;
 
 	vec3 final_contribution = vec3(0);
@@ -121,7 +123,7 @@ vec3 do_spatial_reuse(GBuffer gbuffer, Reservoir reservoir) {
 	} else {
 		final_contribution = prefix_contributions.d[pixel_idx];
 	}
-	if (reservoir.W > 0) {
+	if (reservoir.W > 0.0) {
 		final_contribution += curr_reservoir_contribution * reservoir.W;
 	}
 

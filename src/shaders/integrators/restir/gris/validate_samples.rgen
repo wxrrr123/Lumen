@@ -7,6 +7,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 
 #define SCENE_TEX_IDX 7
 #include "gris_commons.glsl"
@@ -48,6 +50,6 @@ void main() {
 		retrace_paths_and_evaluate(unpacked_neighbor_gbuffer, canonical_reservoir.data, primary_direction,
 								   target_pdf_in_neighbor);
 		reconnection_data[(num_spatial_samples + 1) * pixel_idx + i + 1].target_pdf_in_neighbor =
-			target_pdf_in_neighbor;
+			float16_t(target_pdf_in_neighbor);
 	}
 }
