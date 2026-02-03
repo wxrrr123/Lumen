@@ -14,8 +14,8 @@
 
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
 
-layout(binding = 4, std430) writeonly buffer OutReservoirs { Reservoir out_reservoirs[]; };
-layout(binding = 5, std430) writeonly buffer OutGBuffer { GBuffer out_gbuffers[]; };
+layout(binding = 4, scalar) writeonly buffer OutReservoirs { Reservoir out_reservoirs[]; };
+layout(binding = 5, scalar) writeonly buffer OutGBuffer { GBuffer out_gbuffers[]; };
 layout(binding = 6, rgba16) writeonly uniform image2D canonical_contributions_tex;
 layout(binding = 7, rgba32f) uniform image2D direct_lighting_img;
 
@@ -145,7 +145,7 @@ void main() {
 		if (connectable_this_vertex) {
 			vec2 rc_barycentrics = payload.attribs;
 			uvec2 rc_primitive_instance_id = uvec2(payload.triangle_idx, payload.instance_idx);
-			reconnection_data.rc_barycentrics = f16vec2(rc_barycentrics);
+			reconnection_data.rc_barycentrics = (rc_barycentrics);
 			reconnection_data.rc_primitive_instance_id = rc_primitive_instance_id;
 			reconnection_data.rc_coords = rc_coords;
 #if DEBUG == 1
@@ -163,7 +163,7 @@ void main() {
 			throughput_until_rc = throughput;
 #endif	// STREAMING_MODE == STREAMING_MODE_SPLIT
 			vec3 to_prev = origin.xyz - gbuffer.pos;
-			reconnection_data.rc_partial_jacobian = float16_t(abs(dot(n_s, wo)) * rc_partial_jacobian / dot(to_prev, to_prev));
+			reconnection_data.rc_partial_jacobian = (abs(dot(n_s, wo)) * rc_partial_jacobian / dot(to_prev, to_prev));
 		}
 
 		connectable = !connectable_vertex_found && curr_rough;
@@ -171,7 +171,7 @@ void main() {
 		if (depth == 0) {
 			// Fill in GBuffer
 			direct_lighting += throughput * hit_mat.emissive_factor;
-			gbuffer_out.barycentrics = f16vec2(payload.attribs);
+			gbuffer_out.barycentrics = (payload.attribs);
 			gbuffer_out.primitive_instance_id = uvec2(payload.triangle_idx, payload.instance_idx);
 		} else {
 			float mis_weight = 1.0;
@@ -232,7 +232,7 @@ void main() {
 			sample_bsdf(n_s, wo, hit_mat, 1 /*radiance=cam*/, side, direction, bsdf_pdf_val, cos_theta, sampling_seed);
 
 		if (connectable_this_vertex) {
-			reconnection_data.rc_partial_jacobian *= float16_t(bsdf_pdf_val);
+			reconnection_data.rc_partial_jacobian *= (bsdf_pdf_val);
 			reconnection_data.rc_wi = f16vec2(to_spherical(direction));
 		}
 
@@ -258,8 +258,8 @@ void main() {
 			if (nee_connectable && any(greaterThan(Li, vec3(0)))) {
 				reconnection_data.rc_coords = rc_coords;
 				// reconnection_data.rc_partial_jacobian = rc_partial_jacobian;
-				reconnection_data.rc_partial_jacobian = float16_t(1);
-				reconnection_data.rc_barycentrics = f16vec2(light_record.bary);
+				reconnection_data.rc_partial_jacobian = (1);
+				reconnection_data.rc_barycentrics = (light_record.bary);
 				reconnection_data.rc_primitive_instance_id = uvec2(light_record.triangle_idx, light_record.light_idx);
 #if DEBUG == 1
 				reconnection_data.debug_seed = debug_seed;
@@ -304,7 +304,7 @@ void main() {
 					reservoir.data.path_flags = (reservoir.data.path_flags & ~0x7u) | RECONNECTION_TYPE_NEE_AFTER_RC;
 					reservoir.data.rc_seed = floatBitsToUint(nee_pdf_light_w);
 					if (bsdf_pdf_val != 0) {
-						reservoir.data.rc_partial_jacobian /= float16_t(bsdf_pdf_val);
+						reservoir.data.rc_partial_jacobian /= (bsdf_pdf_val);
 					}
 				}
 #if STREAMING_MODE == STREAMING_MODE_SPLIT

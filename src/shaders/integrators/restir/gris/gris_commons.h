@@ -59,7 +59,7 @@ struct PCReSTIRPT {
 
 
 struct GBuffer {
-	f16vec2 barycentrics;
+	vec2 barycentrics;
 	uvec2 primitive_instance_id;
 };
 
@@ -75,25 +75,24 @@ struct GrisData {
 	// Layout for the path flags
 	// 1b is_directional_light | 1b side | 5b postfix_length| 5b prefix_length |3b is_nee/is_nee_postfix/emissive_after_rc/emissive/default
 	uint path_flags;
-	f16vec2 rc_barycentrics;
+	vec2 rc_barycentrics;
 	uvec2 seed_helpers;
 	uvec2 rc_primitive_instance_id;
 	uint rc_coords;
-	float16_t rc_partial_jacobian; // g * rc_pdf (* rc_postfix_pdf)
+	float rc_partial_jacobian; // g * rc_pdf (* rc_postfix_pdf)
 };
 
 struct Reservoir {
-	GrisData data;
-	float16_t M;
-	float16_t W;
-	float16_t w_sum;
-	float16_t target_pdf;
+	GrisData data; // 52B
+	float16_t M; // 2B
+	float16_t W; // 2B
+	float16_t w_sum; // 2B
+	float16_t target_pdf; // 2B
 };
 
 struct ReconnectionData {
 	f16vec3 reservoir_contribution;
 	float16_t jacobian;
-	// vec2 pad;
 	float16_t new_jacobian;
 	float16_t target_pdf_in_neighbor;
 };

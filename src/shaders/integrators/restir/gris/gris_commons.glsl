@@ -201,7 +201,7 @@ vec3 from_spherical(const vec2 v) {
 }
 
 void init_gbuffer(out GBuffer gbuffer) {
-	gbuffer.barycentrics = f16vec2(0);
+	gbuffer.barycentrics = vec2(0);
 	gbuffer.primitive_instance_id = uvec2(-1);
 }
 

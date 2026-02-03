@@ -13,10 +13,10 @@
 #define SCENE_TEX_IDX 10
 #include "gris_commons.glsl"
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
-layout(binding = 4, std430) readonly buffer PathReconnections { ReconnectionData reconnection_data[]; };
-layout(binding = 5, std430) readonly buffer InReservoirs { Reservoir in_reservoirs[]; };
-layout(binding = 6, std430) writeonly buffer OutReservoirs { Reservoir out_reservoirs[]; };
-layout(binding = 7, std430) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
+layout(binding = 4, scalar) readonly buffer PathReconnections { ReconnectionData reconnection_data[]; };
+layout(binding = 5, scalar) readonly buffer InReservoirs { Reservoir in_reservoirs[]; };
+layout(binding = 6, scalar) writeonly buffer OutReservoirs { Reservoir out_reservoirs[]; };
+layout(binding = 7, scalar) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
 layout(binding = 8, rgba16) uniform image2D canonical_contributions_tex;
 layout(binding = 9, rgba32f) uniform image2D direct_lighting_img;
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.general_seed);
@@ -114,7 +114,7 @@ vec3 do_spatial_reuse(GBuffer gbuffer, Reservoir reservoir) {
 #endif	// ENABLE_DEFENSIVE_PAIRWISE_MIS
 
 	reservoir.data.reservoir_contribution = float16_t(calc_target_pdf(curr_reservoir_contribution));
-	reservoir.data.rc_partial_jacobian = float16_t(curr_new_partial_jacobian);
+	reservoir.data.rc_partial_jacobian = (curr_new_partial_jacobian);
 	out_reservoirs[pixel_idx] = reservoir;
 
 	vec3 final_contribution = vec3(0);
