@@ -542,12 +542,8 @@ void LumenScene::load_mitsuba_scene(const std::string& path) {
 	MitsubaParser mitsuba_parser;
 	mitsuba_parser.parse(path);
 
-    // =========================================================
-    // [FIX] 1. 強制設定 Integrator 為 "restirgi"
-    // =========================================================
-    // 這樣才會建立 ReSTIRConfig，並分配正確的緩衝區 (Reservoirs)
-    std::cout << ">>> [HACK] Forcing Integrator Type to: RESTIRGI" << std::endl;
-    create_scene_config("restirgi"); 
+    std::cout << ">>> [HACK] Forcing Integrator Type to: RESTIRPT" << std::endl;
+    create_scene_config("restirpt"); 
 
 	SceneConfig* curr_config = config.get();
 
