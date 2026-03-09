@@ -21,17 +21,20 @@ layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Deb
 DebugVisBuffer debug_vis = DebugVisBuffer(scene_desc.debug_vis_addr);
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if(debug_vis.d[gl_GlobalInvocationID.x] == 1) {
-        ivec2 coords = ivec2(gl_GlobalInvocationID.x / pc.size_y, gl_GlobalInvocationID.x % pc.size_y);
-        imageStore(image, ivec2(coords), vec4(vec3(1,1, 1), 1.f));
+    ivec2 coords = ivec2(gl_GlobalInvocationID.x / pc.size_y, gl_GlobalInvocationID.x % pc.size_y);
+    
+    if (pc.pixel_debug == 1) {
+        uint rejected_count = debug_vis.d[idx];
+        float ratio = float(rejected_count) / max(float(pc.num_spatial_samples), 1.0);
+        vec3 color = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), ratio);
+        imageStore(image, coords, vec4(color, 1.0));
     } else if(pc.gris_separator < 1.0) {
         int x = int(gl_GlobalInvocationID.x) / int(pc.size_y);
         float uv_x =  float(x) / float(pc.size_x);
         float line = clamp(1.0 - abs(uv_x - pc.gris_separator), 0, 1);
-        if(line > 0.999 ) {
+        if(line > 0.999) {
             ivec2 coords = ivec2(x, gl_GlobalInvocationID.x % pc.size_y);
             imageStore(image, ivec2(coords), vec4(vec3(1,0,0), 1.f));
-
         }
     }
 

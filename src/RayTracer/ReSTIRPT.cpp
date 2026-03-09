@@ -291,7 +291,7 @@ void ReSTIRPT::render() {
 				uint32_t num_wgs = uint32_t((Window::width() * Window::height() + 1023) / 1024);
 				vk::render_graph()
 					->add_compute(
-						"GRIS - Debug Visualiation",
+						"GRIS - Debug Visualization",
 						{.shader = vk::Shader("src/shaders/integrators/restir/gris/debug_vis.comp"), .dims = {num_wgs}})
 					.push_constants(&pc_ray)
 					.bind({output_tex, scene_ubo_buffer, lumen_scene->scene_desc_buffer});
