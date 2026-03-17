@@ -43,7 +43,6 @@ struct PCReSTIRPT {
 	uint enable_temporal_jitter;
 };
 
-
 struct GBuffer {
 	vec2 barycentrics;
 	uvec2 primitive_instance_id;

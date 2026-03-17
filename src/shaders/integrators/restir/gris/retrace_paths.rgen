@@ -48,7 +48,7 @@ void main() {
 		vec3 dist_vec = canonical_gbuffer.pos - unpacked_neighbor_gbuffer.pos;
 		float dist_sq = dot(dist_vec, dist_vec);
 		
-		const float normal_threshold = 1.0; 
+		const float normal_threshold = 0.5; 
 		const float dist_threshold_sq = pow(pc.scene_extent * 0.05, 2.0);
 
 		if (normal_sim < normal_threshold || dist_sq > dist_threshold_sq) {

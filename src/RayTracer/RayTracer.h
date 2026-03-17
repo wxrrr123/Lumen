@@ -59,7 +59,7 @@ class RayTracer {
 
 	clock_t start;
 	bool debug = false;
-	bool write_exr = false;
+	bool write_exr = true;
 	bool has_gt = false;
 	bool show_cam_stats = false;
 
