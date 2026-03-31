@@ -68,7 +68,7 @@ struct GrisData {
 };
 
 struct Reservoir {
-	GrisData data;
+	// GrisData data;
 	uint M;
 	float W;
 	float w_sum;

@@ -8,11 +8,13 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
 
-#define SCENE_TEX_IDX 7
+// #define SCENE_TEX_IDX 7
+#define SCENE_TEX_IDX 8
 #include "gris_commons.glsl"
 layout(binding = 4, std430) buffer PathReconnections { ReconnectionData reconnection_data[]; };
-layout(binding = 5, std430) readonly buffer InReservoirs { Reservoir in_reservoirs[]; };
+layout(binding = 5, std430) readonly buffer InReservoirs { Reservoir in_headers[]; };
 layout(binding = 6, std430) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
+layout(binding = 7, std430) readonly buffer InResData { GrisData in_resdata[]; };
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.general_seed);
 uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
 
@@ -22,11 +24,18 @@ void main() {
 		return;
 	}
 
+	Reservoir canonical_header = in_headers[pixel_idx];
+    if (canonical_header.M == 0) {
+        return;
+    }
+
+	GrisData canonical_data = in_resdata[pixel_idx];
+
 	HitData canonical_gbuffer =
 		get_hitdata(gbuffer.barycentrics, gbuffer.primitive_instance_id.y, gbuffer.primitive_instance_id.x);
 
 	uint num_spatial_samples = pc.enable_spatial_reuse == 1 ? pc.num_spatial_samples : 0;
-	const Reservoir canonical_reservoir = in_reservoirs[pixel_idx];
+	// const Reservoir canonical_reservoir = in_reservoirs[pixel_idx];
 
 	for (uint i = 0; i < num_spatial_samples; i++) {
 		ivec2 rand_offset = get_neighbor_offset(seed2);
@@ -35,6 +44,12 @@ void main() {
 		if (any(lessThan(coords, ivec2(0))) || any(greaterThanEqual(coords, gl_LaunchSizeEXT.xy))) {
 			continue;
 		}
+
+		Reservoir neighbor_header = in_headers[neighbor_pixel_idx];
+        if (neighbor_header.M > 20) {
+			continue;
+		}
+
 		GBuffer neighbor_gbuffer = curr_gbuffers[neighbor_pixel_idx];
 		if (!gbuffer_data_valid(neighbor_gbuffer)) {
 			continue;
@@ -47,7 +62,7 @@ void main() {
 		vec3 dist_vec = canonical_gbuffer.pos - unpacked_neighbor_gbuffer.pos;
 		float dist_sq = dot(dist_vec, dist_vec);
 
-		const float normal_threshold = 0.5; 
+		const float normal_threshold = 0.99; 
 		const float dist_threshold_sq = pow(pc.scene_extent * 0.05, 2.0);
 
 		if (normal_sim < normal_threshold || dist_sq > dist_threshold_sq) {
@@ -58,8 +73,8 @@ void main() {
 		ReconnectionData data = reconnection_data[num_spatial_samples * pixel_idx + i];
 		float target_pdf_in_neighbor = 0;
 		vec3 primary_direction = get_primary_direction(uvec2(coords));
-		retrace_paths_and_evaluate(unpacked_neighbor_gbuffer, canonical_reservoir.data, primary_direction,
-								   target_pdf_in_neighbor);
+		retrace_paths_and_evaluate(unpacked_neighbor_gbuffer, canonical_data, primary_direction,
+                                   target_pdf_in_neighbor);
 		reconnection_data[(num_spatial_samples + 1) * pixel_idx + i + 1].target_pdf_in_neighbor =
 			target_pdf_in_neighbor;
 	}

@@ -21,6 +21,8 @@ class ReSTIRPT final : public Integrator {
 	vk::Buffer* gris_prev_gbuffer;
 	vk::Buffer* gris_reservoir_ping_buffer;
 	vk::Buffer* gris_reservoir_pong_buffer;
+	vk::Buffer* gris_data_ping_buffer;
+	vk::Buffer* gris_data_pong_buffer;
 	vk::Buffer* prefix_contribution_buffer;
 	vk::Buffer* reconnection_buffer;
 	vk::Buffer* transformations_buffer;

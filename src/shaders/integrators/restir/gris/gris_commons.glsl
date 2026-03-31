@@ -4,9 +4,18 @@ layout(location = 0) rayPayloadEXT GrisHitPayload payload;
 layout(location = 1) rayPayloadEXT AnyHitPayload any_hit_payload;
 layout(push_constant) uniform _PushConstantRay { PCReSTIRPT pc; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer GrisReservoir { Reservoir d[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 4) buffer GrisDataBuffer { GrisData d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer GrisDirectLighting { vec3 d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer PrefixContributions { vec3 d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Transformation { mat4 m[]; };
+
+GrisReservoir in_reservoirs = GrisReservoir(scene_desc.gris_reservoir_addr);
+GrisDataBuffer in_data = GrisDataBuffer(scene_desc.gris_data_addr);
+
+struct FullReservoir {
+    Reservoir header;
+    GrisData data;
+};
 
 Transformation transforms = Transformation(scene_desc.transformations_addr);
 const uint flags = gl_RayFlagsOpaqueEXT;
@@ -207,55 +216,64 @@ void init_data(out GrisData data) {
 	data.rc_primitive_instance_id = uvec2(-1);
 }
 
-void init_reservoir(out Reservoir r) {
+void init_reservoir(out FullReservoir r) {
 	init_data(r.data);
-	r.M = 0;
-	r.W = 0.0;
-	r.w_sum = 0.0;
-	r.target_pdf = 0.0;
+	r.header.M = 0;
+	r.header.W = 0.0;
+	r.header.w_sum = 0.0;
+	r.header.target_pdf = 0.0;
+}
+
+void init_reservoir_header(out Reservoir r) {
+    r.M = 0;
+    r.W = 0.0;
+    r.w_sum = 0.0;
+    r.target_pdf = 0.0;
 }
 
 bool reservoir_data_valid(in GrisData data) { return data.path_flags != 0; }
 
 bool gbuffer_data_valid(in GBuffer gbuffer) { return gbuffer.primitive_instance_id.y != -1; }
 
-bool update_reservoir(inout uvec4 seed, inout Reservoir r_new, const GrisData data, float target_pdf,
+bool update_reservoir(inout uvec4 seed, inout FullReservoir r_new, const GrisData data, float target_pdf,
 					  float inv_source_pdf) {
 	float w_i = target_pdf * inv_source_pdf;
-	r_new.w_sum += w_i;
-	if (rand(seed) * r_new.w_sum < w_i) {
+	r_new.header.w_sum += w_i;
+	if (rand(seed) * r_new.header.w_sum < w_i) {
 		r_new.data = data;
-		r_new.target_pdf = target_pdf;
+		r_new.header.target_pdf = target_pdf;
 		return true;
 	}
 	return false;
 }
 
-bool stream_reservoir(inout uvec4 seed, inout Reservoir r_new, const GrisData data, float target_pdf,
+bool stream_reservoir(inout uvec4 seed, inout FullReservoir r_new, const GrisData data, float target_pdf,
 					  float inv_source_pdf) {
-	r_new.M++;
+	r_new.header.M++;
 	if (target_pdf <= 0.0 || isnan(inv_source_pdf) || inv_source_pdf <= 0.0) {
 		return false;
 	}
 	return update_reservoir(seed, r_new, data, target_pdf, inv_source_pdf);
 }
 
-bool combine_reservoir(inout uvec4 seed, inout Reservoir target_reservoir, const Reservoir input_reservoir,
+bool combine_reservoir(inout uvec4 seed, inout FullReservoir target_reservoir, const FullReservoir input_reservoir,
 					   float target_pdf, float mis_weight, float jacobian) {
-	target_reservoir.M += input_reservoir.M;
-	float inv_source_pdf = mis_weight * jacobian * input_reservoir.W;
+	target_reservoir.header.M += input_reservoir.header.M;
+	float inv_source_pdf = mis_weight * jacobian * input_reservoir.header.W;
 	if (isnan(inv_source_pdf) || inv_source_pdf == 0.0 || isinf(inv_source_pdf)) {
 		return false;
 	}
 	return update_reservoir(seed, target_reservoir, input_reservoir.data, target_pdf, inv_source_pdf);
 }
 
-void calc_reservoir_W(inout Reservoir r) {
-	float denom = r.target_pdf * r.M;
-	r.W = denom == 0.0 ? 0.0 : r.w_sum / denom;
+void calc_reservoir_W(inout FullReservoir r) {
+	float denom = r.header.target_pdf * r.header.M;
+	r.header.W = denom == 0.0 ? 0.0 : r.header.w_sum / denom;
 }
 
-void calc_reservoir_W_with_mis(inout Reservoir r) { r.W = r.target_pdf == 0.0 ? 0.0 : r.w_sum / r.target_pdf; }
+void calc_reservoir_W_with_mis(inout FullReservoir r) { 
+    r.header.W = r.header.target_pdf == 0.0 ? 0.0 : r.header.w_sum / r.header.target_pdf;
+}
 
 float calc_target_pdf(vec3 f) { return luminance(f); }
 
@@ -554,41 +572,27 @@ bool retrace_paths_and_evaluate(in HitData dst_gbuffer, in GrisData data, vec3 d
 	return retrace_paths_and_evaluate(dst_gbuffer, data, dst_wi, data.rc_partial_jacobian, target_pdf);
 }
 
-bool process_reservoir(inout uvec4 seed, inout Reservoir reservoir, inout float m_c, in Reservoir canonical_reservoir,
-					   in Reservoir source_reservoir, in ReconnectionData data, ivec2 neighbor_coords,
+bool process_reservoir(inout uvec4 seed, inout FullReservoir reservoir, inout float m_c, in FullReservoir canonical_reservoir,
+					   in FullReservoir source_reservoir, in ReconnectionData data, ivec2 neighbor_coords,
 					   float canonical_in_canonical_pdf, uint num_spatial_samples,
 					   inout vec3 curr_reservoir_contribution) {
-	source_reservoir.M = min(source_reservoir.M, 20);
-
+	source_reservoir.header.M = min(source_reservoir.header.M, 20);
 	bool result = false;
 
 	float neighbor_in_neighbor_pdf = source_reservoir.data.reservoir_contribution;
 	float neighbor_in_canonical_pdf = calc_target_pdf(data.reservoir_contribution) * data.jacobian;
 
-	float m_i_num = source_reservoir.M * neighbor_in_neighbor_pdf;
-	float m_i_denom = m_i_num + canonical_reservoir.M * neighbor_in_canonical_pdf / num_spatial_samples;
+	float m_i_num = source_reservoir.header.M * neighbor_in_neighbor_pdf;
+	float m_i_denom = m_i_num + canonical_reservoir.header.M * neighbor_in_canonical_pdf / num_spatial_samples;
 	float m_i = neighbor_in_canonical_pdf <= 0 ? 0 : m_i_num / m_i_denom;
 
-	// if (m_i <= 0.0 || m_i >= 1.0) {
-	// 	reservoir.M += source_reservoir.M;
-	// 	m_c += 1.0;
-	// 	return false;
-	// }
-
 	m_c += 1.0;
-	float m_c_num = source_reservoir.M * data.target_pdf_in_neighbor;
-	float m_c_denom = m_c_num + canonical_reservoir.M * canonical_in_canonical_pdf / num_spatial_samples;
+	float m_c_num = source_reservoir.header.M * data.target_pdf_in_neighbor;
+	float m_c_denom = m_c_num + canonical_reservoir.header.M * canonical_in_canonical_pdf / num_spatial_samples;
 	float m_c_val = m_c_denom == 0.0 ? 0.0 : m_c_num / m_c_denom;
 	if (m_c_val > 0) {
 		m_c -= m_c_val;
 	}
-	// if (m_c_val <= 0.0) {
-	// 	reservoir.M += source_reservoir.M;
-	// 	return false;
-	// }
-
-	// ASSERT1(m_c_val > -1e-3 && m_c_val <= 1.001, "m_c_val <= 1.0 : %f\n", m_c_val);
-	// ASSERT1(m_i > -1e-3 && m_i <= 1.001, "m_i <= 1.0 : %f\n", m_i);
 
 	bool accepted = combine_reservoir(seed, reservoir, source_reservoir, calc_target_pdf(data.reservoir_contribution),
 									  m_i, data.jacobian);

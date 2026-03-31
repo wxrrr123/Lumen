@@ -8,11 +8,13 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
 
-#define SCENE_TEX_IDX 7
+// #define SCENE_TEX_IDX 7
+#define SCENE_TEX_IDX 8
 #include "gris_commons.glsl"
 layout(binding = 4, std430) buffer PathReconnections { ReconnectionData reconnection_data[]; };
-layout(binding = 5, std430) readonly buffer InReservoirs { Reservoir in_reservoirs[]; };
+layout(binding = 5, std430) readonly buffer InResHeaders { Reservoir in_headers[]; };
 layout(binding = 6, std430) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
+layout(binding = 7, std430) readonly buffer InResData { GrisData in_resdata[]; };
 uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
 
 void main() {
@@ -31,6 +33,12 @@ void main() {
 		if (any(lessThan(coords, ivec2(0))) || any(greaterThanEqual(coords, gl_LaunchSizeEXT.xy))) {
 			continue;
 		}
+
+		Reservoir neighbor_header = in_headers[neighbor_pixel_idx];
+        if (neighbor_header.M > 20) {
+            continue;
+        }
+
 		ReconnectionData data;
 		data.reservoir_contribution = vec3(0);
 		data.jacobian = 0;
@@ -38,7 +46,8 @@ void main() {
 		if (!gbuffer_data_valid(neighbor_gbuffer)) {
 			continue;
 		}
-		const Reservoir neighbor_reservoir = in_reservoirs[neighbor_pixel_idx];
+		// const Reservoir neighbor_reservoir = in_reservoirs[neighbor_pixel_idx];
+		GrisData neighbor_data = in_resdata[neighbor_pixel_idx];
 
 		HitData unpacked_neighbor_gbuffer =
 			get_hitdata(neighbor_gbuffer.barycentrics, neighbor_gbuffer.primitive_instance_id.y,
@@ -48,7 +57,7 @@ void main() {
 		vec3 dist_vec = canonical_gbuffer.pos - unpacked_neighbor_gbuffer.pos;
 		float dist_sq = dot(dist_vec, dist_vec);
 		
-		const float normal_threshold = 0.5; 
+		const float normal_threshold = 0.99; 
 		const float dist_threshold_sq = pow(pc.scene_extent * 0.05, 2.0);
 
 		if (normal_sim < normal_threshold || dist_sq > dist_threshold_sq) {
@@ -58,9 +67,9 @@ void main() {
 		}
 
 		vec3 primary_direction = get_primary_direction(uvec2(gl_LaunchIDEXT.xy));
-		retrace_paths(canonical_gbuffer, neighbor_reservoir.data, primary_direction,
-					  neighbor_reservoir.data.rc_partial_jacobian, data.jacobian, data.reservoir_contribution,
-					  data.new_jacobian);
+		retrace_paths(canonical_gbuffer, neighbor_data, primary_direction,
+                      neighbor_data.rc_partial_jacobian, data.jacobian, data.reservoir_contribution,
+                      data.new_jacobian);
 		reconnection_data[(num_spatial_samples + 1) * pixel_idx + i + 1] = data;
 	}
 }

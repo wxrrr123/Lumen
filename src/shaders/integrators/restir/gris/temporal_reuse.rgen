@@ -8,14 +8,17 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
 
-#define SCENE_TEX_IDX 9
+// #define SCENE_TEX_IDX 9
+#define SCENE_TEX_IDX 11
 #include "gris_commons.glsl"
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
-layout(binding = 4, std430) buffer OutReservoirs { Reservoir curr_reservoirs[]; };
-layout(binding = 5, std430) readonly buffer InReservoirs { Reservoir prev_reservoirs[]; };
+layout(binding = 4, std430) buffer CurrResHeaders { Reservoir curr_headers[]; };
+layout(binding = 5, std430) readonly buffer PrevResHeaders { Reservoir prev_headers[]; };
 layout(binding = 6, std430) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
 layout(binding = 7, std430) readonly buffer PrevGBuffer { GBuffer prev_gbuffers[]; };
 layout(binding = 8, rgba16) uniform image2D canonical_contributions_tex;
+layout(binding = 9, std430) buffer CurrResData { GrisData curr_data[]; };
+layout(binding = 10, std430) readonly buffer PrevResData { GrisData prev_data[]; };
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed3);
 
 ivec2 get_permuted_coords(inout uvec4 seed, ivec2 coords) {
@@ -28,13 +31,23 @@ ivec2 get_permuted_coords(inout uvec4 seed, ivec2 coords) {
 }
 
 void main() {
-	Reservoir reservoir;
+	// Reservoir reservoir;
+	// init_reservoir(reservoir);
+	// GBuffer gbuffer = curr_gbuffers[pixel_idx];
+	// if (!gbuffer_data_valid(gbuffer)) {
+	// 	return;
+	// }
+	// Reservoir canonical_reservoir = curr_reservoirs[pixel_idx];
+	FullReservoir reservoir;
 	init_reservoir(reservoir);
 	GBuffer gbuffer = curr_gbuffers[pixel_idx];
 	if (!gbuffer_data_valid(gbuffer)) {
 		return;
 	}
-	Reservoir canonical_reservoir = curr_reservoirs[pixel_idx];
+
+	FullReservoir canonical_reservoir;
+	canonical_reservoir.header = curr_headers[pixel_idx];
+	canonical_reservoir.data = curr_data[pixel_idx];
 
 	HitData canonical_gbuffer =
 		get_hitdata(gbuffer.barycentrics, gbuffer.primitive_instance_id.y, gbuffer.primitive_instance_id.x);
@@ -56,16 +69,32 @@ void main() {
 
 	if (!(any(lessThan(prev_coords, ivec2(0))) || any(greaterThanEqual(prev_coords, gl_LaunchSizeEXT.xy)))) {
 		const uint prev_idx = prev_coords.x * pc.size_y + prev_coords.y;
+		// GBuffer prev_gbuffer = prev_gbuffers[prev_idx];
+		// if (gbuffer_data_valid(prev_gbuffer)) {
+		// 	ReconnectionData data;
+		// 	data.reservoir_contribution = vec3(0);
+		// 	data.jacobian = 0;
+		// 	data.target_pdf_in_neighbor = 0;
+
+		// 	const Reservoir prev_reservoir = prev_reservoirs[prev_idx];
+		// 	HitData prev_hitdata = get_hitdata(prev_gbuffer.barycentrics, prev_gbuffer.primitive_instance_id.y,
+		// 									   prev_gbuffer.primitive_instance_id.x);
 		GBuffer prev_gbuffer = prev_gbuffers[prev_idx];
 		if (gbuffer_data_valid(prev_gbuffer)) {
-			ReconnectionData data;
-			data.reservoir_contribution = vec3(0);
-			data.jacobian = 0;
-			data.target_pdf_in_neighbor = 0;
+			Reservoir prev_header = prev_headers[prev_idx];
+			
+			if (prev_header.M > 0) {
+				ReconnectionData data;
+				data.reservoir_contribution = vec3(0);
+				data.jacobian = 0;
+				data.target_pdf_in_neighbor = 0;
 
-			const Reservoir prev_reservoir = prev_reservoirs[prev_idx];
-			HitData prev_hitdata = get_hitdata(prev_gbuffer.barycentrics, prev_gbuffer.primitive_instance_id.y,
-											   prev_gbuffer.primitive_instance_id.x);
+				FullReservoir prev_reservoir;
+				prev_reservoir.header = prev_header;
+				prev_reservoir.data = prev_data[prev_idx];
+
+				HitData prev_hitdata = get_hitdata(prev_gbuffer.barycentrics, prev_gbuffer.primitive_instance_id.y,
+												   prev_gbuffer.primitive_instance_id.x);
 
 			vec3 primary_direction = get_primary_direction(uvec2(gl_LaunchIDEXT.xy));
 			vec3 prev_primary_direction = get_prev_primary_direction(uvec2(prev_coords));
@@ -78,6 +107,7 @@ void main() {
 
 			prev_accepted = process_reservoir(seed, reservoir, m_c, canonical_reservoir, prev_reservoir, data,
 											  prev_coords, canonical_in_canonical_pdf, 1, curr_reservoir_contribution);
+			}											  
 		}
 	}
 
@@ -97,5 +127,7 @@ void main() {
 		reservoir.data.reservoir_contribution = calc_target_pdf(curr_reservoir_contribution);
 	}
 
-	curr_reservoirs[pixel_idx] = reservoir;
+	// curr_reservoirs[pixel_idx] = reservoir;
+	curr_headers[pixel_idx] = reservoir.header;
+	curr_data[pixel_idx] = reservoir.data;
 }

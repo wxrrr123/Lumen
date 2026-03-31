@@ -7,7 +7,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
-#define SCENE_TEX_IDX 8
+// #define SCENE_TEX_IDX 8
+#define SCENE_TEX_IDX 9
 #include "gris_commons.glsl"
 
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
@@ -16,6 +17,7 @@ layout(binding = 4, std430) writeonly buffer OutReservoirs { Reservoir out_reser
 layout(binding = 5, std430) writeonly buffer OutGBuffer { GBuffer out_gbuffers[]; };
 layout(binding = 6, rgba16) writeonly uniform image2D canonical_contributions_tex;
 layout(binding = 7, rgba32f) uniform image2D direct_lighting_img;
+layout(binding = 8, std430) writeonly buffer OutGrisData { GrisData out_data[]; };
 
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.general_seed);
 uvec4 sampling_seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.sampling_seed);
@@ -41,7 +43,7 @@ void main() {
 	bool connectable_vertex_found = false;
 	bool prev_rough = false;
 	bool curr_rough = false;
-	Reservoir reservoir;
+	FullReservoir reservoir;
 	GrisData reconnection_data;
 	init_reservoir(reservoir);
 	init_data(reconnection_data);
@@ -398,15 +400,15 @@ void main() {
 	}
 
 	if (pc.enable_gris == 1) {
-		ASSERT(reservoir.w_sum >= reservoir.target_pdf);
+		ASSERT(reservoir.header.w_sum >= reservoir.header.target_pdf);
 		// The samples are additive, therefore set M to 1
-		reservoir.M = 1;
+		reservoir.header.M = 1;
 		calc_reservoir_W(reservoir);
 		prefix_contributions.d[pixel_idx] = prefix_col;
 		reservoir.data.seed_helpers = uvec2(pc.general_seed, pc.sampling_seed);
 		float uv_x = float(gl_LaunchIDEXT.x) / float(gl_LaunchSizeEXT.x);
 		if (pc.canonical_only == 1 || uv_x >= pc.gris_separator) {
-			col = prefix_col + selected_contribution * reservoir.W;
+			col = prefix_col + selected_contribution * reservoir.header.W;
 			if (pc.direct_lighting == 1) {
 				col += direct_lighting;
 			}
@@ -423,7 +425,8 @@ void main() {
 
 		if (pc.canonical_only == 0) {
 			imageStore(canonical_contributions_tex, ivec2(gl_LaunchIDEXT.xy), vec4(selected_contribution, 1));
-			out_reservoirs[pixel_idx] = reservoir;
+			out_reservoirs[pixel_idx] = reservoir.header;
+			out_data[pixel_idx] = reservoir.data;
 			out_gbuffers[pixel_idx] = gbuffer_out;
 		}
 	}

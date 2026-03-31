@@ -8,15 +8,18 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
 
-#define SCENE_TEX_IDX 10
+// #define SCENE_TEX_IDX 10
+#define SCENE_TEX_IDX 12
 #include "gris_commons.glsl"
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
 layout(binding = 4, std430) readonly buffer PathReconnections { ReconnectionData reconnection_data[]; };
-layout(binding = 5, std430) readonly buffer InReservoirs { Reservoir in_reservoirs[]; };
-layout(binding = 6, std430) writeonly buffer OutReservoirs { Reservoir out_reservoirs[]; };
+layout(binding = 5, std430) readonly buffer InReservoirs { Reservoir in_headers[]; };
+layout(binding = 6, std430) writeonly buffer OutReservoirs { Reservoir out_headers[]; };
 layout(binding = 7, std430) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
 layout(binding = 8, rgba16) uniform image2D canonical_contributions_tex;
 layout(binding = 9, rgba32f) uniform image2D direct_lighting_img;
+layout(binding = 10, std430) readonly buffer InResData { GrisData in_resdata[]; };
+layout(binding = 11, std430) writeonly buffer OutResData { GrisData out_resdata[]; };
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.general_seed);
 uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
 
@@ -25,12 +28,15 @@ DebugVisBuffer debug_vis = DebugVisBuffer(scene_desc.debug_vis_addr);
 
 // TODO: Maybe use an external buffer to supply spatial offsets?
 
-vec3 do_spatial_reuse(GBuffer gbuffer, Reservoir reservoir) {
-	HitData canonical_gbuffer =
-		get_hitdata(gbuffer.barycentrics, gbuffer.primitive_instance_id.y, gbuffer.primitive_instance_id.x);
-	Reservoir canonical_reservoir = in_reservoirs[pixel_idx];
-
-	int num_spatial_samples = pc.enable_spatial_reuse == 1 ? int(pc.num_spatial_samples) : 0;
+vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
+    HitData canonical_gbuffer =
+        get_hitdata(gbuffer.barycentrics, gbuffer.primitive_instance_id.y, gbuffer.primitive_instance_id.x);
+    
+    FullReservoir canonical_reservoir;
+    canonical_reservoir.header = in_headers[pixel_idx];
+    canonical_reservoir.data = in_resdata[pixel_idx];
+    
+    int num_spatial_samples = pc.enable_spatial_reuse == 1 ? int(pc.num_spatial_samples) : 0;
 	vec3 curr_reservoir_contribution = vec3(0);
 
 	float canonical_in_canonical_pdf = canonical_reservoir.data.reservoir_contribution;
@@ -58,11 +64,19 @@ vec3 do_spatial_reuse(GBuffer gbuffer, Reservoir reservoir) {
 			continue;
 		}
 		const uint neighbor_pixel_idx = neighbor_coords.x * pc.size_y + neighbor_coords.y;
+		Reservoir neighbor_header = in_headers[neighbor_pixel_idx];
+    
+		if (neighbor_header.M > 20) {
+			continue;
+		}
 		GBuffer neighbor_gbuffer = curr_gbuffers[neighbor_pixel_idx];
 		if (!gbuffer_data_valid(neighbor_gbuffer)) {
 			continue;
 		}
-		Reservoir neighbor_reservoir = in_reservoirs[neighbor_pixel_idx];
+		// Reservoir neighbor_reservoir = in_headers[neighbor_pixel_idx];
+		FullReservoir neighbor_reservoir;
+        neighbor_reservoir.header = neighbor_header;
+        neighbor_reservoir.data = in_resdata[neighbor_pixel_idx];
 #if 1
 		ReconnectionData data = reconnection_data[(num_spatial_samples + 1) * pixel_idx + i + 1];
 		if (data.jacobian == -1.0) {
@@ -113,14 +127,16 @@ vec3 do_spatial_reuse(GBuffer gbuffer, Reservoir reservoir) {
 
 	calc_reservoir_W_with_mis(reservoir);
 #ifdef ENABLE_DEFENSIVE_PAIRWISE_MIS
-	reservoir.W /= (1.0 + num_valid_samples);
+    reservoir.header.W /= (1.0 + num_valid_samples);
 #else
-	reservoir.W /= max(num_valid_samples, 1);
+    reservoir.header.W /= max(num_valid_samples, 1);
 #endif	// ENABLE_DEFENSIVE_PAIRWISE_MIS
 
 	reservoir.data.reservoir_contribution = calc_target_pdf(curr_reservoir_contribution);
 	reservoir.data.rc_partial_jacobian = curr_new_partial_jacobian;
-	out_reservoirs[pixel_idx] = reservoir;
+	// out_headers[pixel_idx] = reservoir;
+	out_headers[pixel_idx] = reservoir.header;
+    out_resdata[pixel_idx] = reservoir.data;
 
 	vec3 final_contribution = vec3(0);
 	if (pc.hide_reconnection_radiance == 1) {
@@ -128,10 +144,9 @@ vec3 do_spatial_reuse(GBuffer gbuffer, Reservoir reservoir) {
 	} else {
 		final_contribution = prefix_contributions.d[pixel_idx];
 	}
-	if (reservoir.W > 0) {
-		final_contribution += curr_reservoir_contribution * reservoir.W;
-	}
-
+	if (reservoir.header.W > 0) {
+        final_contribution += curr_reservoir_contribution * reservoir.header.W;
+    }
 	float uv_x = float(gl_LaunchIDEXT.x) / float(gl_LaunchSizeEXT.x);
 
 	vec3 col = vec3(0);
@@ -148,20 +163,23 @@ vec3 do_spatial_reuse(GBuffer gbuffer, Reservoir reservoir) {
 }
 
 void main() {
-	float uv_x = float(gl_LaunchIDEXT.x) / float(gl_LaunchSizeEXT.x);
-	if (uv_x >= pc.gris_separator) {
-		return;
-	}
-	GBuffer gbuffer = curr_gbuffers[pixel_idx];
-	Reservoir reservoir;
-	init_reservoir(reservoir);
-	vec3 col;
-	if (!gbuffer_data_valid(gbuffer)) {
-		out_reservoirs[pixel_idx] = reservoir;
-		col = imageLoad(direct_lighting_img, ivec2(gl_LaunchIDEXT.xy)).xyz;
-	} else {
-		col = do_spatial_reuse(gbuffer, reservoir);
-	}
+    float uv_x = float(gl_LaunchIDEXT.x) / float(gl_LaunchSizeEXT.x);
+    if (uv_x >= pc.gris_separator) {
+        return;
+    }
+    GBuffer gbuffer = curr_gbuffers[pixel_idx];
+    
+    FullReservoir reservoir;
+    init_reservoir(reservoir);
+    
+    vec3 col;
+    if (!gbuffer_data_valid(gbuffer)) {
+        out_headers[pixel_idx] = reservoir.header;
+        out_resdata[pixel_idx] = reservoir.data;
+        col = imageLoad(direct_lighting_img, ivec2(gl_LaunchIDEXT.xy)).xyz;
+    } else {
+        col = do_spatial_reuse(gbuffer, reservoir);
+    }
 	ivec2 neighbor_coords = ivec2(gl_LaunchIDEXT.xy);
 	if (pc.enable_accumulation == 0 || pc.frame_num == 0) {
 		imageStore(image, ivec2(neighbor_coords), vec4(col, 1.f));
