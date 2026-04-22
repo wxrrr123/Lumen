@@ -71,6 +71,23 @@ ivec2 get_neighbor_offset(inout uvec4 seed) {
 	return ivec2(floor(cos(randa) * randr), floor(sin(randa) * randr));
 }
 
+ivec2 get_neighbor_offset_warp_aligned(inout uvec4 seed, ivec2 pixel_coords) {
+    uint warp_id = (pixel_coords.x / 32) * (gl_LaunchSizeEXT.y) + pixel_coords.y;
+    uvec4 warp_seed = init_rng(uvec2(warp_id, 0), uvec2(1,1), pc.seed2);
+    
+    const float base_angle = rand(warp_seed) * 2 * PI;
+    const float base_r = sqrt(rand(warp_seed)) * pc.spatial_radius;
+    
+    const float jitter_angle = (rand(seed) - 0.5) * PI * 0.25;
+    const float jitter_r = (rand(seed) - 0.5) * pc.spatial_radius * 0.2;
+    
+    float final_angle = base_angle + jitter_angle;
+    float final_r = clamp(base_r + jitter_r, 0, pc.spatial_radius);
+    
+    return ivec2(floor(cos(base_angle) * base_r), 
+                 floor(sin(base_angle) * base_r));
+}
+
 HitData get_hitdata(vec2 attribs, uint instance_idx, uint triangle_idx, out float area) {
 	const PrimMeshInfo pinfo = prim_infos.d[instance_idx];
 	const uint index_offset = pinfo.index_offset + 3 * triangle_idx;

@@ -64,7 +64,7 @@ void ReSTIRPT::init() {
 		prm::get_buffer({.name = "Debug Vis",
 						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
 								  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-						 .memory_type = vk::BufferType::GPU,
+						 .memory_type = vk::BufferType::GPU_TO_CPU,
 						 .size = Window::width() * Window::height() * sizeof(uint32_t)});
 	reconnection_buffer = prm::get_buffer(
 		{.name = "Reservoir Connection",
@@ -319,6 +319,19 @@ void ReSTIRPT::render() {
 		}
 	}
 	pc_ray.total_frame_num++;
+
+	if (pc_ray.pixel_debug) {
+		vkDeviceWaitIdle(vk::context().device);
+
+		void* mapped = nullptr;
+		vmaMapMemory(vk::context().allocator, debug_vis_buffer->allocation, &mapped);
+		
+		uint32_t* counts = (uint32_t*)mapped;
+		float rate = counts[1] / float(std::max(counts[0], 1u));
+		LUMEN_TRACE("Hot terminate rate: {:.1f}% ({}/{})", rate * 100, counts[1], counts[0]);
+		
+		vmaUnmapMemory(vk::context().allocator, debug_vis_buffer->allocation);
+	}
 }
 
 bool ReSTIRPT::update() {
@@ -335,6 +348,8 @@ void ReSTIRPT::destroy() {
 	auto buffer_list = {gris_gbuffer,
 						gris_reservoir_ping_buffer,
 						gris_reservoir_pong_buffer,
+						gris_data_ping_buffer,
+    					gris_data_pong_buffer,
 						transformations_buffer,
 						prefix_contribution_buffer,
 						reconnection_buffer,

@@ -303,6 +303,7 @@ bool RayTracer::gui() {
 		}
 	}
 	ImGui::Text("Memory Usage: %.2f MB", vk::get_memory_usage(vk::context().physical_device) * 1e-6);
+	ImGui::Text("Resolution: %d * %d", Window::width(), Window::height());
 	bool updated = false;
 	ImGui::Checkbox("Show camera statistics", &show_cam_stats);
 	if (show_cam_stats) {

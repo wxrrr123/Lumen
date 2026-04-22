@@ -12,14 +12,14 @@
 #define SCENE_TEX_IDX 12
 #include "gris_commons.glsl"
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
-layout(binding = 4, std430) readonly buffer PathReconnections { ReconnectionData reconnection_data[]; };
-layout(binding = 5, std430) readonly buffer InReservoirs { Reservoir in_headers[]; };
-layout(binding = 6, std430) writeonly buffer OutReservoirs { Reservoir out_headers[]; };
-layout(binding = 7, std430) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
+layout(binding = 4, scalar) readonly buffer PathReconnections { ReconnectionData reconnection_data[]; };
+layout(binding = 5, scalar) readonly buffer InReservoirs { Reservoir in_headers[]; };
+layout(binding = 6, scalar) writeonly buffer OutReservoirs { Reservoir out_headers[]; };
+layout(binding = 7, scalar) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
 layout(binding = 8, rgba16) uniform image2D canonical_contributions_tex;
 layout(binding = 9, rgba32f) uniform image2D direct_lighting_img;
-layout(binding = 10, std430) readonly buffer InResData { GrisData in_resdata[]; };
-layout(binding = 11, std430) writeonly buffer OutResData { GrisData out_resdata[]; };
+layout(binding = 10, scalar) readonly buffer InResData { GrisData in_resdata[]; };
+layout(binding = 11, scalar) writeonly buffer OutResData { GrisData out_resdata[]; };
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.general_seed);
 uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
 
@@ -59,6 +59,7 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 #endif	// ENABLE_DEFENSIVE_PAIRWISE_MIS
 	for (int i = 0; i < num_spatial_samples; i++) {
 		ivec2 rand_offset = get_neighbor_offset(neighbor_seed);
+		// ivec2 rand_offset = get_neighbor_offset_warp_aligned(seed2, ivec2(gl_LaunchIDEXT.xy));
 		const ivec2 neighbor_coords = ivec2(gl_LaunchIDEXT.xy) + rand_offset;
 		if (any(lessThan(neighbor_coords, ivec2(0))) || any(greaterThanEqual(neighbor_coords, gl_LaunchSizeEXT.xy))) {
 			continue;
@@ -66,9 +67,8 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 		const uint neighbor_pixel_idx = neighbor_coords.x * pc.size_y + neighbor_coords.y;
 		Reservoir neighbor_header = in_headers[neighbor_pixel_idx];
     
-		if (neighbor_header.M > 20) {
-			continue;
-		}
+		if (neighbor_header.W == 0.0 || neighbor_header.M == 0) continue;
+
 		GBuffer neighbor_gbuffer = curr_gbuffers[neighbor_pixel_idx];
 		if (!gbuffer_data_valid(neighbor_gbuffer)) {
 			continue;
@@ -76,7 +76,6 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 		// Reservoir neighbor_reservoir = in_headers[neighbor_pixel_idx];
 		FullReservoir neighbor_reservoir;
         neighbor_reservoir.header = neighbor_header;
-        neighbor_reservoir.data = in_resdata[neighbor_pixel_idx];
 #if 1
 		ReconnectionData data = reconnection_data[(num_spatial_samples + 1) * pixel_idx + i + 1];
 		if (data.jacobian == -1.0) {
@@ -84,6 +83,7 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 			continue;
 		}
 #else
+        neighbor_reservoir.data = in_resdata[neighbor_pixel_idx];
 		uvec2 seed_helpers = uvec2(pc.general_seed, pc.sampling_seed);
 		ReconnectionData data;
 		data.reservoir_contribution = vec3(0);
@@ -156,9 +156,9 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 
 	col += final_contribution;
 
-	if (pc.pixel_debug == 1) {
-		debug_vis.d[pixel_idx] = num_rejected_positions;
-	}
+	// if (pc.pixel_debug == 1) {
+	// 	debug_vis.d[pixel_idx] = num_rejected_positions;
+	// }
 	return col;
 }
 
