@@ -2,7 +2,7 @@
 
 <scene version="0.5.0" >
 	<integrator type="restirgi" >
-		<integer name="maxDepth" value="3" />
+		<integer name="maxDepth" value="10" />
 		<boolean name="strictNormals" value="true" />
 	</integrator>
 	<sensor type="perspective" >

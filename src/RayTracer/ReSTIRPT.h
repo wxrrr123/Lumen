@@ -29,8 +29,8 @@ class ReSTIRPT final : public Integrator {
 	vk::Texture* direct_lighting_texture;
 
 	PCReSTIRPT pc_ray{};
-	bool enable_accumulation = false;
-	bool direct_lighting = false;
+	bool enable_accumulation = true;
+	bool direct_lighting = true;
 	bool enable_rr = false;
 	bool enable_spatial_reuse = true;
 	bool canonical_only = false;
