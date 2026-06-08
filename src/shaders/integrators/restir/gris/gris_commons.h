@@ -41,6 +41,7 @@ struct PCReSTIRPT {
 	float gris_separator;
 	uint enable_occlusion;
 	uint enable_temporal_jitter;
+	uint compact_slot_count;
 };
 
 struct GBuffer {

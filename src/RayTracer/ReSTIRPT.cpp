@@ -41,18 +41,34 @@ void ReSTIRPT::init() {
 						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 						 .memory_type = vk::BufferType::GPU,
 						 .size = Window::width() * Window::height() * sizeof(Reservoir)});
-	
-	gris_data_ping_buffer = 
-		prm::get_buffer({.name = "GRIS Data Ping",
-						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-						 .memory_type = vk::BufferType::GPU,
-						 .size = Window::width() * Window::height() * sizeof(GrisData)});						 
+						 
+	gris_importance_flag_ping_buffer =
+		prm::get_buffer({.name = "GRIS Importance Flag Ping",
+						.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+						VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+						.memory_type = vk::BufferType::GPU,
+						.size = Window::width() * Window::height() * sizeof(uint32_t)});
+							
+	gris_importance_flag_pong_buffer =
+		prm::get_buffer({.name = "GRIS Importance Flag Pong",
+						.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+						VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+						.memory_type = vk::BufferType::GPU,
+						.size = Window::width() * Window::height() * sizeof(uint32_t)});
+								
+	gris_compact_data_buffer =
+		prm::get_buffer({.name = "GRIS Compact Data",
+						.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+								VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+						.memory_type = vk::BufferType::GPU,
+						.size = (size_t)(Window::width() * Window::height() * sizeof(GrisData) / 2)});
 
-	gris_data_pong_buffer = 
-		prm::get_buffer({.name = "GRIS Data Pong",
-						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-						 .memory_type = vk::BufferType::GPU,
-						 .size = Window::width() * Window::height() * sizeof(GrisData)});						 
+	gris_importance_counter_buffer =
+		prm::get_buffer({.name = "GRIS Importance Counter",
+						.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+								VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+						.memory_type = vk::BufferType::GPU,
+						.size = sizeof(uint32_t)});					 
 
 	prefix_contribution_buffer =
 		prm::get_buffer({.name = "Prefix Contributions",
@@ -162,7 +178,7 @@ void ReSTIRPT::render() {
 
 	const std::array<vk::Buffer*, 2> reservoir_buffers = {gris_reservoir_ping_buffer, gris_reservoir_pong_buffer};
 	const std::array<vk::Buffer*, 2> gbuffers = {gris_prev_gbuffer, gris_gbuffer};
-	const std::array<vk::Buffer*, 2> data_buffers = {gris_data_ping_buffer, gris_data_pong_buffer};
+	const std::array<vk::Buffer*, 2> flag_buffers = {gris_importance_flag_ping_buffer, gris_importance_flag_pong_buffer};
 
 	int ping = pc_ray.total_frame_num % 2;
 	int pong = ping ^ 1;
@@ -190,7 +206,10 @@ void ReSTIRPT::render() {
 		.bind(gbuffers[pong])
 		.bind(canonical_contributions_texture)
 		.bind(direct_lighting_texture)
-		.bind(data_buffers[WRITE_OR_CURR_IDX])
+		.bind(flag_buffers[WRITE_OR_CURR_IDX])
+		.bind(gris_compact_data_buffer)
+		.zero(gris_importance_counter_buffer)
+		.bind(gris_importance_counter_buffer)
 		.bind_texture_array(lumen_scene->scene_textures)
 		.bind_tlas(tlas);
 	pc_ray.general_seed = rand() % UINT_MAX;
@@ -214,8 +233,9 @@ void ReSTIRPT::render() {
 			.bind(gbuffers[pong])
 			.bind(gbuffers[ping])
 			.bind(canonical_contributions_texture)
-			.bind(data_buffers[WRITE_OR_CURR_IDX])
-			.bind(data_buffers[READ_OR_PREV_IDX])
+			.bind(flag_buffers[WRITE_OR_CURR_IDX])
+			.bind(flag_buffers[READ_OR_PREV_IDX])
+			.bind(gris_compact_data_buffer)
 			.bind_texture_array(lumen_scene->scene_textures)
 			.bind_tlas(tlas)
 			.skip_execution(!should_do_temporal);
@@ -258,7 +278,8 @@ void ReSTIRPT::render() {
 					.bind(reconnection_buffer)
 					.bind(reservoir_buffers[WRITE_OR_CURR_IDX])
 					.bind(gbuffers[pong])
-					.bind(data_buffers[WRITE_OR_CURR_IDX])
+					.bind(flag_buffers[WRITE_OR_CURR_IDX])
+					.bind(gris_compact_data_buffer)
 					.bind_texture_array(lumen_scene->scene_textures)
 					.bind_tlas(tlas);
 				// Validate
@@ -277,7 +298,8 @@ void ReSTIRPT::render() {
 					.bind(reconnection_buffer)
 					.bind(reservoir_buffers[WRITE_OR_CURR_IDX])
 					.bind(gbuffers[pong])
-					.bind(data_buffers[WRITE_OR_CURR_IDX])
+					.bind(flag_buffers[WRITE_OR_CURR_IDX])
+					.bind(gris_compact_data_buffer)
 					.bind_texture_array(lumen_scene->scene_textures)
 					.bind_tlas(tlas);
 
@@ -302,8 +324,11 @@ void ReSTIRPT::render() {
 					.bind(gbuffers[pong])
 					.bind(canonical_contributions_texture)
 					.bind(direct_lighting_texture)
-					.bind(data_buffers[WRITE_OR_CURR_IDX])
-					.bind(data_buffers[READ_OR_PREV_IDX])
+					.bind(flag_buffers[WRITE_OR_CURR_IDX])
+					.bind(flag_buffers[READ_OR_PREV_IDX])
+					.bind(gris_compact_data_buffer)
+					.zero(gris_importance_counter_buffer)
+					.bind(gris_importance_counter_buffer)
 					.bind_texture_array(lumen_scene->scene_textures)
 					.bind_tlas(tlas);
 			}
@@ -348,8 +373,10 @@ void ReSTIRPT::destroy() {
 	auto buffer_list = {gris_gbuffer,
 						gris_reservoir_ping_buffer,
 						gris_reservoir_pong_buffer,
-						gris_data_ping_buffer,
-    					gris_data_pong_buffer,
+						gris_importance_flag_ping_buffer,
+						gris_importance_flag_pong_buffer,
+						gris_compact_data_buffer,
+						gris_importance_counter_buffer,
 						transformations_buffer,
 						prefix_contribution_buffer,
 						reconnection_buffer,

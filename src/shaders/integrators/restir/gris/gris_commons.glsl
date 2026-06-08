@@ -4,18 +4,22 @@ layout(location = 0) rayPayloadEXT GrisHitPayload payload;
 layout(location = 1) rayPayloadEXT AnyHitPayload any_hit_payload;
 layout(push_constant) uniform _PushConstantRay { PCReSTIRPT pc; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer GrisReservoir { Reservoir d[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 4) buffer GrisDataBuffer { GrisData d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer GrisDirectLighting { vec3 d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer PrefixContributions { vec3 d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Transformation { mat4 m[]; };
 
 GrisReservoir in_reservoirs = GrisReservoir(scene_desc.gris_reservoir_addr);
-GrisDataBuffer in_data = GrisDataBuffer(scene_desc.gris_data_addr);
 
 struct FullReservoir {
     Reservoir header;
     GrisData data;
 };
+
+#define IMPORTANCE_INVALID 0xFFFFFFFF
+float calc_importance(Reservoir header) {
+    return header.W * float(header.M);
+}
+#define IMPORTANCE_THRESHOLD 0.0
 
 Transformation transforms = Transformation(scene_desc.transformations_addr);
 const uint flags = gl_RayFlagsOpaqueEXT;

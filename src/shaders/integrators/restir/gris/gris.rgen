@@ -8,7 +8,7 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
 // #define SCENE_TEX_IDX 8
-#define SCENE_TEX_IDX 9
+#define SCENE_TEX_IDX 11
 #include "gris_commons.glsl"
 
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
@@ -17,12 +17,16 @@ layout(binding = 4, scalar) writeonly buffer OutReservoirs { Reservoir out_reser
 layout(binding = 5, scalar) writeonly buffer OutGBuffer { GBuffer out_gbuffers[]; };
 layout(binding = 6, rgba16) writeonly uniform image2D canonical_contributions_tex;
 layout(binding = 7, rgba32f) uniform image2D direct_lighting_img;
-layout(binding = 8, scalar) writeonly buffer OutGrisData { GrisData out_data[]; };
+layout(binding = 8, scalar) buffer OutImportanceFlags { uint out_flags[]; };
+layout(binding = 9, scalar) buffer CompactData { GrisData compact_data[]; };
+layout(binding = 10, scalar) coherent buffer ImportanceCounter { uint importance_count; };
 
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.general_seed);
 uvec4 sampling_seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.sampling_seed);
 
 void main() {
+	out_flags[pixel_idx] = IMPORTANCE_INVALID; // Default
+
 	const vec2 pixel = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
 	const vec2 in_uv = pixel / vec2(gl_LaunchSizeEXT.xy);
 	vec2 d = in_uv * 2.0 - 1.0;
@@ -426,7 +430,21 @@ void main() {
 		if (pc.canonical_only == 0) {
 			imageStore(canonical_contributions_tex, ivec2(gl_LaunchIDEXT.xy), vec4(selected_contribution, 1));
 			out_reservoirs[pixel_idx] = reservoir.header;
-			out_data[pixel_idx] = reservoir.data;
+			
+			float imp = calc_importance(reservoir.header);
+			uint max_slots = uint(float(gl_LaunchSizeEXT.x * gl_LaunchSizeEXT.y / 2));
+			if (imp > IMPORTANCE_THRESHOLD) {
+				uint slot = atomicAdd(importance_count, 1u);
+				if (slot < max_slots) {
+					out_flags[pixel_idx] = slot;
+					compact_data[slot] = reservoir.data;
+				} else {
+					out_flags[pixel_idx] = IMPORTANCE_INVALID;
+				}
+			} else {
+				out_flags[pixel_idx] = IMPORTANCE_INVALID;
+			}
+
 			out_gbuffers[pixel_idx] = gbuffer_out;
 		}
 	}

@@ -290,7 +290,9 @@ struct Material {
 	// ReSTIR PT
 	uint64_t gris_gbuffer_addr;
 	uint64_t gris_reservoir_addr;
-	uint64_t gris_data_addr;
+	uint64_t gris_compact_data_addr;
+	uint64_t gris_importance_flag_addr;
+	uint64_t gris_importance_counter_addr; 
 	uint64_t prefix_contributions_addr;
 	uint64_t transformations_addr;
 	uint64_t debug_vis_addr;

@@ -21,8 +21,10 @@ class ReSTIRPT final : public Integrator {
 	vk::Buffer* gris_prev_gbuffer;
 	vk::Buffer* gris_reservoir_ping_buffer;
 	vk::Buffer* gris_reservoir_pong_buffer;
-	vk::Buffer* gris_data_ping_buffer;
-	vk::Buffer* gris_data_pong_buffer;
+	vk::Buffer* gris_compact_data_buffer;
+	vk::Buffer* gris_importance_flag_ping_buffer;
+	vk::Buffer* gris_importance_flag_pong_buffer;
+	vk::Buffer* gris_importance_counter_buffer;
 	vk::Buffer* prefix_contribution_buffer;
 	vk::Buffer* reconnection_buffer;
 	vk::Buffer* transformations_buffer;
@@ -31,8 +33,8 @@ class ReSTIRPT final : public Integrator {
 	vk::Texture* direct_lighting_texture;
 
 	PCReSTIRPT pc_ray{};
-	bool enable_accumulation = false;
-	bool direct_lighting = false;
+	bool enable_accumulation = true;
+	bool direct_lighting = true;
 	bool enable_rr = false;
 	bool enable_spatial_reuse = true;
 	bool canonical_only = false;
@@ -50,6 +52,7 @@ class ReSTIRPT final : public Integrator {
 	float gris_separator = 1.0f;
 	uint32_t path_length = 0;
 	uint32_t num_spatial_samples = 1;
+	static constexpr float compact_ratio = 0.5f;
 	StreamingMethod streaming_method = StreamingMethod::INDIVIDUAL_CONTRIBUTIONS;
 	MISMethod mis_method = MISMethod::PAIRWISE;
 	ReSTIRPTConfig* config;

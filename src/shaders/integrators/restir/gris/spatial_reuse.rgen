@@ -9,7 +9,7 @@
 #extension GL_EXT_shader_atomic_float : require
 
 // #define SCENE_TEX_IDX 10
-#define SCENE_TEX_IDX 12
+#define SCENE_TEX_IDX 14
 #include "gris_commons.glsl"
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
 layout(binding = 4, scalar) readonly buffer PathReconnections { ReconnectionData reconnection_data[]; };
@@ -18,8 +18,10 @@ layout(binding = 6, scalar) writeonly buffer OutReservoirs { Reservoir out_heade
 layout(binding = 7, scalar) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
 layout(binding = 8, rgba16) uniform image2D canonical_contributions_tex;
 layout(binding = 9, rgba32f) uniform image2D direct_lighting_img;
-layout(binding = 10, scalar) readonly buffer InResData { GrisData in_resdata[]; };
-layout(binding = 11, scalar) writeonly buffer OutResData { GrisData out_resdata[]; };
+layout(binding = 10, scalar) readonly buffer InImportanceFlags { uint in_flags[]; };
+layout(binding = 11, scalar) writeonly buffer OutImportanceFlags { uint out_flags[]; };
+layout(binding = 12, scalar) buffer CompactData { GrisData compact_data[]; };
+layout(binding = 13, scalar) coherent buffer ImportanceCounter { uint importance_count; };
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.general_seed);
 uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
 
@@ -34,7 +36,10 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
     
     FullReservoir canonical_reservoir;
     canonical_reservoir.header = in_headers[pixel_idx];
-    canonical_reservoir.data = in_resdata[pixel_idx];
+	uint canonical_slot = in_flags[pixel_idx];
+	if (canonical_slot != IMPORTANCE_INVALID) {
+		canonical_reservoir.data = compact_data[canonical_slot];
+	}
     
     int num_spatial_samples = pc.enable_spatial_reuse == 1 ? int(pc.num_spatial_samples) : 0;
 	vec3 curr_reservoir_contribution = vec3(0);
@@ -59,7 +64,6 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 #endif	// ENABLE_DEFENSIVE_PAIRWISE_MIS
 	for (int i = 0; i < num_spatial_samples; i++) {
 		ivec2 rand_offset = get_neighbor_offset(neighbor_seed);
-		// ivec2 rand_offset = get_neighbor_offset_warp_aligned(seed2, ivec2(gl_LaunchIDEXT.xy));
 		const ivec2 neighbor_coords = ivec2(gl_LaunchIDEXT.xy) + rand_offset;
 		if (any(lessThan(neighbor_coords, ivec2(0))) || any(greaterThanEqual(neighbor_coords, gl_LaunchSizeEXT.xy))) {
 			continue;
@@ -73,7 +77,6 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 		if (!gbuffer_data_valid(neighbor_gbuffer)) {
 			continue;
 		}
-		// Reservoir neighbor_reservoir = in_headers[neighbor_pixel_idx];
 		FullReservoir neighbor_reservoir;
         neighbor_reservoir.header = neighbor_header;
 #if 1
@@ -82,8 +85,11 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 			rejected_positions[num_rejected_positions++] = neighbor_pixel_idx;
 			continue;
 		}
+
+		uint neighbor_slot = in_flags[neighbor_pixel_idx];
+		if (neighbor_slot == IMPORTANCE_INVALID) continue;
+		neighbor_reservoir.data = compact_data[neighbor_slot];
 #else
-        neighbor_reservoir.data = in_resdata[neighbor_pixel_idx];
 		uvec2 seed_helpers = uvec2(pc.general_seed, pc.sampling_seed);
 		ReconnectionData data;
 		data.reservoir_contribution = vec3(0);
@@ -134,9 +140,20 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 
 	reservoir.data.reservoir_contribution = calc_target_pdf(curr_reservoir_contribution);
 	reservoir.data.rc_partial_jacobian = curr_new_partial_jacobian;
-	// out_headers[pixel_idx] = reservoir;
 	out_headers[pixel_idx] = reservoir.header;
-    out_resdata[pixel_idx] = reservoir.data;
+	float imp = calc_importance(reservoir.header);
+	uint max_slots = gl_LaunchSizeEXT.x * gl_LaunchSizeEXT.y / 2;
+	if (imp > IMPORTANCE_THRESHOLD) {
+		uint slot = atomicAdd(importance_count, 1u);
+		if (slot < max_slots) {
+			out_flags[pixel_idx] = slot;
+			compact_data[slot] = reservoir.data;
+		} else {
+			out_flags[pixel_idx] = IMPORTANCE_INVALID;
+		}
+	} else {
+		out_flags[pixel_idx] = IMPORTANCE_INVALID;
+	}
 
 	vec3 final_contribution = vec3(0);
 	if (pc.hide_reconnection_radiance == 1) {
@@ -175,7 +192,7 @@ void main() {
     vec3 col;
     if (!gbuffer_data_valid(gbuffer)) {
         out_headers[pixel_idx] = reservoir.header;
-        out_resdata[pixel_idx] = reservoir.data;
+		out_flags[pixel_idx] = uint(IMPORTANCE_INVALID);
         col = imageLoad(direct_lighting_img, ivec2(gl_LaunchIDEXT.xy)).xyz;
     } else {
         col = do_spatial_reuse(gbuffer, reservoir);
