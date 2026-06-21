@@ -8,8 +8,7 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
 
-// #define SCENE_TEX_IDX 9
-#define SCENE_TEX_IDX 12
+#define SCENE_TEX_IDX 13
 #include "gris_commons.glsl"
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
 layout(binding = 4, scalar) buffer CurrResHeaders { Reservoir curr_headers[]; };
@@ -19,7 +18,8 @@ layout(binding = 7, scalar) readonly buffer PrevGBuffer { GBuffer prev_gbuffers[
 layout(binding = 8, rgba16) uniform image2D canonical_contributions_tex;
 layout(binding = 9, scalar) buffer CurrImportanceFlags { uint curr_flags[]; };
 layout(binding = 10, scalar) readonly buffer PrevImportanceFlags { uint prev_flags[]; };
-layout(binding = 11, scalar) buffer CompactData { GrisData compact_data[]; };
+layout(binding = 11, scalar) buffer CurrCompactData { GrisData curr_compact_data[]; };
+layout(binding = 12, scalar) readonly buffer PrevCompactData { GrisData prev_compact_data[]; };
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed3);
 
 ivec2 get_permuted_coords(inout uvec4 seed, ivec2 coords) {
@@ -40,11 +40,22 @@ void main() {
 	}
 
 	uint canonical_slot = curr_flags[pixel_idx];
-	if (canonical_slot == IMPORTANCE_INVALID) return;
+	if (!compact_slot_valid(canonical_slot)) {
+		curr_flags[pixel_idx] = IMPORTANCE_INVALID;
+		return;
+	}
 
 	FullReservoir canonical_reservoir;
 	canonical_reservoir.header = curr_headers[pixel_idx];
-	canonical_reservoir.data = compact_data[canonical_slot];
+	if (canonical_reservoir.header.M == 0 || canonical_reservoir.header.W == 0.0) {
+		curr_flags[pixel_idx] = IMPORTANCE_INVALID;
+		return;
+	}
+	canonical_reservoir.data = curr_compact_data[canonical_slot];
+	if (!reservoir_data_valid(canonical_reservoir.data)) {
+		curr_flags[pixel_idx] = IMPORTANCE_INVALID;
+		return;
+	}
 
 	HitData canonical_gbuffer =
 		get_hitdata(gbuffer.barycentrics, gbuffer.primitive_instance_id.y, gbuffer.primitive_instance_id.x);
@@ -70,9 +81,9 @@ void main() {
 		if (gbuffer_data_valid(prev_gbuffer)) {
 			Reservoir prev_header = prev_headers[prev_idx];
 			
-			if (prev_header.M > 0) {
+			if (prev_header.M > 0 && prev_header.W > 0.0) {
 				uint prev_slot = prev_flags[prev_idx];
-				if (prev_slot != IMPORTANCE_INVALID) {
+				if (compact_slot_valid(prev_slot)) {
 					ReconnectionData data;
 					data.reservoir_contribution = vec3(0);
 					data.jacobian = 0;
@@ -80,22 +91,24 @@ void main() {
 
 					FullReservoir prev_reservoir;
 					prev_reservoir.header = prev_header;
-					prev_reservoir.data = compact_data[prev_slot];
+					prev_reservoir.data = prev_compact_data[prev_slot];
+					if (reservoir_data_valid(prev_reservoir.data)) {
 
-					HitData prev_hitdata = get_hitdata(prev_gbuffer.barycentrics, prev_gbuffer.primitive_instance_id.y,
+						HitData prev_hitdata = get_hitdata(prev_gbuffer.barycentrics, prev_gbuffer.primitive_instance_id.y,
 													prev_gbuffer.primitive_instance_id.x);
 
-					vec3 primary_direction = get_primary_direction(uvec2(gl_LaunchIDEXT.xy));
-					vec3 prev_primary_direction = get_prev_primary_direction(uvec2(prev_coords));
-					retrace_paths(canonical_gbuffer, prev_reservoir.data, primary_direction,
+						vec3 primary_direction = get_primary_direction(uvec2(gl_LaunchIDEXT.xy));
+						vec3 prev_primary_direction = get_prev_primary_direction(uvec2(prev_coords));
+						retrace_paths(canonical_gbuffer, prev_reservoir.data, primary_direction,
 								prev_reservoir.data.rc_partial_jacobian, data.jacobian, data.reservoir_contribution,
 								new_jacobian);
 
-					retrace_paths_and_evaluate(prev_hitdata, canonical_reservoir.data, prev_primary_direction,
+						retrace_paths_and_evaluate(prev_hitdata, canonical_reservoir.data, prev_primary_direction,
 											data.target_pdf_in_neighbor);
 
-					prev_accepted = process_reservoir(seed, reservoir, m_c, canonical_reservoir, prev_reservoir, data,
-													prev_coords, canonical_in_canonical_pdf, 1, curr_reservoir_contribution);
+						prev_accepted = process_reservoir(seed, reservoir, m_c, canonical_reservoir, prev_reservoir, data,
+														prev_coords, canonical_in_canonical_pdf, 1, curr_reservoir_contribution);
+					}
 				}
 			}											  
 		}
@@ -118,5 +131,5 @@ void main() {
 	}
 
 	curr_headers[pixel_idx] = reservoir.header;
-	compact_data[canonical_slot] = reservoir.data;
+	curr_compact_data[canonical_slot] = reservoir.data;
 }

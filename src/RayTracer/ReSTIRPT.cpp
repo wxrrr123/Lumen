@@ -2,6 +2,7 @@
 #include "Framework/VulkanStructs.h"
 #include "LumenPCH.h"
 #include "ReSTIRPT.h"
+#include <algorithm>
 #include <vulkan/vulkan_core.h>
 #include "imgui/imgui.h"
 
@@ -42,6 +43,23 @@ void ReSTIRPT::init() {
 						 .memory_type = vk::BufferType::GPU,
 						 .size = Window::width() * Window::height() * sizeof(Reservoir)});
 						 
+	const uint32_t compact_slots =
+		std::max(1u, uint32_t(float(Window::width() * Window::height()) * compact_ratio));
+						 
+	gris_compact_data_ping_buffer =
+		prm::get_buffer({.name = "GRIS Compact Data Ping",
+						.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+								VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+						.memory_type = vk::BufferType::GPU,
+						.size = (size_t)(compact_slots * sizeof(GrisData))});
+						 						
+	gris_compact_data_pong_buffer =
+		prm::get_buffer({.name = "GRIS Compact Data Pong",
+						.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+								VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+						.memory_type = vk::BufferType::GPU,
+						.size = (size_t)(compact_slots * sizeof(GrisData))});
+						 
 	gris_importance_flag_ping_buffer =
 		prm::get_buffer({.name = "GRIS Importance Flag Ping",
 						.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -54,14 +72,7 @@ void ReSTIRPT::init() {
 						.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
 						VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 						.memory_type = vk::BufferType::GPU,
-						.size = Window::width() * Window::height() * sizeof(uint32_t)});
-								
-	gris_compact_data_buffer =
-		prm::get_buffer({.name = "GRIS Compact Data",
-						.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-								VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-						.memory_type = vk::BufferType::GPU,
-						.size = (size_t)(Window::width() * Window::height() * sizeof(GrisData) / 2)});
+						.size = Window::width() * Window::height() * sizeof(uint32_t)});								
 
 	gris_importance_counter_buffer =
 		prm::get_buffer({.name = "GRIS Importance Counter",
@@ -101,7 +112,6 @@ void ReSTIRPT::init() {
 
 	desc.material_addr = lumen_scene->materials_buffer->get_device_address();
 	desc.prim_info_addr = lumen_scene->prim_lookup_buffer->get_device_address();
-	desc.compact_vertices_addr = lumen_scene->compact_vertices_buffer->get_device_address();
 	desc.compact_vertices_addr = lumen_scene->compact_vertices_buffer->get_device_address();
 	// ReSTIR PT (GRIS)
 	desc.transformations_addr = transformations_buffer->get_device_address();
@@ -172,12 +182,15 @@ void ReSTIRPT::render() {
 	pc_ray.gris_separator = gris_separator;
 	pc_ray.canonical_only = canonical_only;
 	pc_ray.enable_occlusion = enable_occlusion;
+	pc_ray.compact_slot_count =
+		std::max(1u, uint32_t(float(Window::width() * Window::height()) * compact_ratio));
 
 	const std::initializer_list<lumen::ResourceBinding> common_bindings = {
 		output_tex, scene_ubo_buffer, lumen_scene->scene_desc_buffer, lumen_scene->mesh_lights_buffer};
 
 	const std::array<vk::Buffer*, 2> reservoir_buffers = {gris_reservoir_ping_buffer, gris_reservoir_pong_buffer};
 	const std::array<vk::Buffer*, 2> gbuffers = {gris_prev_gbuffer, gris_gbuffer};
+	const std::array<vk::Buffer*, 2> compact_buffers = {gris_compact_data_ping_buffer, gris_compact_data_pong_buffer};
 	const std::array<vk::Buffer*, 2> flag_buffers = {gris_importance_flag_ping_buffer, gris_importance_flag_pong_buffer};
 
 	int ping = pc_ray.total_frame_num % 2;
@@ -207,7 +220,7 @@ void ReSTIRPT::render() {
 		.bind(canonical_contributions_texture)
 		.bind(direct_lighting_texture)
 		.bind(flag_buffers[WRITE_OR_CURR_IDX])
-		.bind(gris_compact_data_buffer)
+		.bind(compact_buffers[WRITE_OR_CURR_IDX])
 		.zero(gris_importance_counter_buffer)
 		.bind(gris_importance_counter_buffer)
 		.bind_texture_array(lumen_scene->scene_textures)
@@ -235,7 +248,8 @@ void ReSTIRPT::render() {
 			.bind(canonical_contributions_texture)
 			.bind(flag_buffers[WRITE_OR_CURR_IDX])
 			.bind(flag_buffers[READ_OR_PREV_IDX])
-			.bind(gris_compact_data_buffer)
+			.bind(compact_buffers[WRITE_OR_CURR_IDX])
+			.bind(compact_buffers[READ_OR_PREV_IDX])
 			.bind_texture_array(lumen_scene->scene_textures)
 			.bind_tlas(tlas)
 			.skip_execution(!should_do_temporal);
@@ -279,7 +293,7 @@ void ReSTIRPT::render() {
 					.bind(reservoir_buffers[WRITE_OR_CURR_IDX])
 					.bind(gbuffers[pong])
 					.bind(flag_buffers[WRITE_OR_CURR_IDX])
-					.bind(gris_compact_data_buffer)
+					.bind(compact_buffers[WRITE_OR_CURR_IDX])
 					.bind_texture_array(lumen_scene->scene_textures)
 					.bind_tlas(tlas);
 				// Validate
@@ -299,7 +313,7 @@ void ReSTIRPT::render() {
 					.bind(reservoir_buffers[WRITE_OR_CURR_IDX])
 					.bind(gbuffers[pong])
 					.bind(flag_buffers[WRITE_OR_CURR_IDX])
-					.bind(gris_compact_data_buffer)
+					.bind(compact_buffers[WRITE_OR_CURR_IDX])
 					.bind_texture_array(lumen_scene->scene_textures)
 					.bind_tlas(tlas);
 
@@ -326,7 +340,8 @@ void ReSTIRPT::render() {
 					.bind(direct_lighting_texture)
 					.bind(flag_buffers[WRITE_OR_CURR_IDX])
 					.bind(flag_buffers[READ_OR_PREV_IDX])
-					.bind(gris_compact_data_buffer)
+					.bind(compact_buffers[WRITE_OR_CURR_IDX])
+					.bind(compact_buffers[READ_OR_PREV_IDX])
 					.zero(gris_importance_counter_buffer)
 					.bind(gris_importance_counter_buffer)
 					.bind_texture_array(lumen_scene->scene_textures)
@@ -352,8 +367,21 @@ void ReSTIRPT::render() {
 		vmaMapMemory(vk::context().allocator, debug_vis_buffer->allocation, &mapped);
 		
 		uint32_t* counts = (uint32_t*)mapped;
-		float rate = counts[1] / float(std::max(counts[0], 1u));
-		LUMEN_TRACE("Hot terminate rate: {:.1f}% ({}/{})", rate * 100, counts[1], counts[0]);
+		uint32_t attempted_compact_count = counts[0];
+		uint32_t compact_count = std::min(attempted_compact_count, pc_ray.compact_slot_count);
+		uint32_t total = Window::width() * Window::height();
+		LUMEN_TRACE("Compact ratio: {:.1f}% ({}/{} stored, {} attempted)",
+					compact_count * 100.0f / total,
+					compact_count,
+					total,
+					attempted_compact_count);
+		float W = (counts[1]);
+		uint M = counts[2];
+		float tp = (counts[3]);
+		LUMEN_TRACE("pixel 0 - W: {}, M: {}, tp: {}", W, M, tp);
+		float spatial_importance = (counts[4]);
+		uint compact_slot_count = counts[5];
+		LUMEN_TRACE("spatial importance: {}, compact slot count: {}", spatial_importance, compact_slot_count);
 		
 		vmaUnmapMemory(vk::context().allocator, debug_vis_buffer->allocation);
 	}
@@ -373,9 +401,10 @@ void ReSTIRPT::destroy() {
 	auto buffer_list = {gris_gbuffer,
 						gris_reservoir_ping_buffer,
 						gris_reservoir_pong_buffer,
+						gris_compact_data_ping_buffer,
+						gris_compact_data_pong_buffer,
 						gris_importance_flag_ping_buffer,
 						gris_importance_flag_pong_buffer,
-						gris_compact_data_buffer,
 						gris_importance_counter_buffer,
 						transformations_buffer,
 						prefix_contribution_buffer,

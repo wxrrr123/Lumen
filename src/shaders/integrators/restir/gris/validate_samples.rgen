@@ -8,7 +8,6 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
 
-// #define SCENE_TEX_IDX 7
 #define SCENE_TEX_IDX 9
 #include "gris_commons.glsl"
 layout(binding = 4, scalar) buffer PathReconnections { ReconnectionData reconnection_data[]; };
@@ -31,7 +30,7 @@ void main() {
     }
 
 	uint canonical_slot = in_flags[pixel_idx];
-	if (canonical_slot == IMPORTANCE_INVALID) return;
+	if (!compact_slot_valid(canonical_slot)) return;
 	GrisData canonical_data = compact_data[canonical_slot];
 
 	HitData canonical_gbuffer =

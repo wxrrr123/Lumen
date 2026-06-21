@@ -16,10 +16,15 @@ struct FullReservoir {
 };
 
 #define IMPORTANCE_INVALID 0xFFFFFFFF
-float calc_importance(Reservoir header) {
-    return header.W * float(header.M);
+#define IMPORTANCE_THRESHOLD -1.0f
+
+float calc_importance(Reservoir h) {
+    return h.W * h.target_pdf;
 }
-#define IMPORTANCE_THRESHOLD 0.0
+
+bool compact_slot_valid(uint slot) {
+	return slot != IMPORTANCE_INVALID && slot < pc.compact_slot_count;
+}
 
 Transformation transforms = Transformation(scene_desc.transformations_addr);
 const uint flags = gl_RayFlagsOpaqueEXT;
@@ -253,6 +258,16 @@ void init_reservoir_header(out Reservoir r) {
 }
 
 bool reservoir_data_valid(in GrisData data) { return data.path_flags != 0; }
+
+bool reservoir_compaction_valid(FullReservoir r) {
+	float imp = calc_importance(r.header);
+	return r.header.M > 0 &&
+		   r.header.W > 0.0 &&
+		   reservoir_data_valid(r.data) &&
+		   imp > IMPORTANCE_THRESHOLD &&
+		   !isnan(imp) &&
+		   !isinf(imp);
+}
 
 bool gbuffer_data_valid(in GBuffer gbuffer) { return gbuffer.primitive_instance_id.y != -1; }
 

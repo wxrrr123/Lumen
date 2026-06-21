@@ -7,7 +7,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
-// #define SCENE_TEX_IDX 8
+
 #define SCENE_TEX_IDX 11
 #include "gris_commons.glsl"
 
@@ -431,9 +431,8 @@ void main() {
 			imageStore(canonical_contributions_tex, ivec2(gl_LaunchIDEXT.xy), vec4(selected_contribution, 1));
 			out_reservoirs[pixel_idx] = reservoir.header;
 			
-			float imp = calc_importance(reservoir.header);
-			uint max_slots = uint(float(gl_LaunchSizeEXT.x * gl_LaunchSizeEXT.y / 2));
-			if (imp > IMPORTANCE_THRESHOLD) {
+			uint max_slots = pc.compact_slot_count;
+			if (reservoir_compaction_valid(reservoir)) {
 				uint slot = atomicAdd(importance_count, 1u);
 				if (slot < max_slots) {
 					out_flags[pixel_idx] = slot;
