@@ -16,7 +16,7 @@ layout(binding = 5, scalar) readonly buffer InResHeaders { Reservoir in_headers[
 layout(binding = 6, scalar) readonly buffer CurrGBuffer { GBuffer curr_gbuffers[]; };
 layout(binding = 7, scalar) readonly buffer InImportanceFlags { uint in_flags[]; };
 layout(binding = 8, scalar) readonly buffer CompactData { GrisData compact_data[]; };
-uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
+uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, neighbor_offset_seed_base());
 
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer DebugVisBuffer { uint d[]; };
 DebugVisBuffer debug_vis = DebugVisBuffer(scene_desc.debug_vis_addr);

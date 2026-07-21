@@ -21,6 +21,9 @@ class RayTracer {
 	void init();
 	void update();
 	void cleanup();
+	// Maps the latest rendered frame back from the GPU and writes it as an EXR.
+	// Used by the headless render path once the requested frames are done.
+	void save_output(const std::string& path);
 	static RayTracer* instance;
 	inline static RayTracer* get() { return instance; }
 	bool resized = false;
@@ -30,6 +33,7 @@ class RayTracer {
 	void cleanup_resources();
 	void parse_args(int argc, char* argv[]);
 	float draw_frame();
+	bool resize_if_needed();
 	void render(uint32_t idx);
 	void render_debug_utils();
 	void create_integrator(int integrator_idx);

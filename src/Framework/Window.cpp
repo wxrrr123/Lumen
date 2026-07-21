@@ -3,6 +3,7 @@
 
 namespace Window {
 Window _window;
+static bool _headless = false;
 
 static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
 	auto ptr = reinterpret_cast<Window*>(glfwGetWindowUserPointer(window));
@@ -88,19 +89,32 @@ static void scroll_callback(GLFWwindow* window, double x, double y) {
 	for (auto& cb : window_ptr->mouse_scroll_callbacks) cb(x, y);
 }
 
-void init(int width, int height, bool fullscreen) {
-	glfwInit();
-	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-	_window.window_handle =
-		glfwCreateWindow(width, height, "Lumen", fullscreen ? glfwGetPrimaryMonitor() : nullptr, nullptr);
-	LUMEN_ASSERT(_window.window_handle, "Failed to create a window!");
-	glfwSetWindowUserPointer(_window.window_handle, &_window);
-	glfwSetKeyCallback(_window.window_handle, key_callback);
-	glfwSetWindowSizeCallback(_window.window_handle, window_size_callback);
-	glfwSetCharCallback(_window.window_handle, char_callback);
-	glfwSetMouseButtonCallback(_window.window_handle, mouse_click_callback);
-	glfwSetCursorPosCallback(_window.window_handle, mouse_move_callback);
-	glfwSetScrollCallback(_window.window_handle, scroll_callback);
+void init(int width, int height, bool fullscreen, bool headless) {
+	_headless = headless;
+	if (!headless) {
+		glfwInit();
+		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+		_window.window_handle =
+			glfwCreateWindow(width, height, "Lumen", fullscreen ? glfwGetPrimaryMonitor() : nullptr, nullptr);
+		LUMEN_ASSERT(_window.window_handle, "Failed to create a window!");
+		if (!fullscreen) {
+			// Some window managers auto-maximize newly created windows, overriding the
+			// requested size. Force it back to the requested size right after creation.
+			glfwRestoreWindow(_window.window_handle);
+			glfwSetWindowSize(_window.window_handle, width, height);
+		}
+		glfwSetWindowUserPointer(_window.window_handle, &_window);
+		glfwSetKeyCallback(_window.window_handle, key_callback);
+		glfwSetWindowSizeCallback(_window.window_handle, window_size_callback);
+		glfwSetCharCallback(_window.window_handle, char_callback);
+		glfwSetMouseButtonCallback(_window.window_handle, mouse_click_callback);
+		glfwSetCursorPosCallback(_window.window_handle, mouse_move_callback);
+		glfwSetScrollCallback(_window.window_handle, scroll_callback);
+	} else {
+		// Headless: no GLFW window backend is available. Skip all window/GLFW
+		// calls; only the size information below is needed by the renderer.
+		_window.window_handle = nullptr;
+	}
 	_window.window_width = width;
 	_window.window_height = height;
 	// Viewport and window sizes are the same for now
@@ -108,18 +122,32 @@ void init(int width, int height, bool fullscreen) {
 	_window.viewport_height = height;
 }
 
-void poll() { glfwPollEvents(); }
+void poll() {
+	if (!_headless) {
+		glfwPollEvents();
+	}
+}
 
 void destroy() {
-	glfwDestroyWindow(_window.window_handle);
-	glfwTerminate();
+	if (!_headless) {
+		glfwDestroyWindow(_window.window_handle);
+		glfwTerminate();
+	}
 }
+
+bool is_headless() { return _headless; }
 
 void add_mouse_click_callback(MouseClickCallback callback) { _window.mouse_click_callbacks.push_back(callback); }
 
 void add_mouse_move_callback(MouseMoveCallback callback) { _window.mouse_move_callbacks.push_back(callback); }
 
 void add_scroll_callback(MouseScrollCallback callback) { _window.mouse_scroll_callbacks.push_back(callback); }
+
+void clear_mouse_callbacks() {
+	_window.mouse_click_callbacks.clear();
+	_window.mouse_move_callbacks.clear();
+	_window.mouse_scroll_callbacks.clear();
+}
 
 void add_key_callback(KeyCallback callback) { _window.key_callbacks.push_back(callback); }
 
@@ -142,7 +170,7 @@ bool is_mouse_up(MouseAction mb, glm::ivec2& pos) {
 	return true;
 }
 
-bool should_close() { return glfwWindowShouldClose(_window.window_handle); }
+bool should_close() { return _headless ? false : glfwWindowShouldClose(_window.window_handle); }
 bool is_key_down(KeyInput input) { return _window.key_map[input] == KeyAction::PRESS; }
 bool is_key_up(KeyInput input) { return _window.key_map[input] == KeyAction::RELEASE; }
 bool is_key_held(KeyInput input) {

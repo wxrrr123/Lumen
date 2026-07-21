@@ -23,11 +23,104 @@ layout(binding = 12, scalar) readonly buffer InCompactData { GrisData in_compact
 layout(binding = 13, scalar) writeonly buffer OutCompactData { GrisData out_compact_data[]; };
 layout(binding = 14, scalar) coherent buffer ImportanceCounter { uint importance_count; };
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.general_seed);
-uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
+uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, neighbor_offset_seed_base());
 
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer DebugVisBuffer { uint d[]; };
 DebugVisBuffer debug_vis = DebugVisBuffer(scene_desc.debug_vis_addr);
 
+// --- Spatial reuse neighbor access locality profiling (debug-only, gated by pc.profile_neighbor_access) ---
+// NeighborAccessCount: per-pixel count of how many times that pixel was selected as an *accepted* spatial
+// reuse neighbor (i.e. its compact GrisData was actually streamed into the canonical reservoir), used to
+// study whether access is concentrated on a few pixels vs. spread out.
+// NeighborDistanceHistogram: log2-bucketed histogram of |neighbor_pixel_idx - canonical_pixel_idx|, where
+// pixel_idx is the same linear buffer index used to index gris_compact_data (pixel_x * size_y + pixel_y),
+// used to study whether accepted neighbors are close together in buffer memory.
+#define NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS 32
+layout(buffer_reference, scalar, buffer_reference_align = 4) coherent buffer NeighborAccessCountBuffer { uint d[]; };
+NeighborAccessCountBuffer neighbor_access_count = NeighborAccessCountBuffer(scene_desc.gris_neighbor_access_count_addr);
+layout(buffer_reference, scalar, buffer_reference_align = 4) coherent buffer NeighborDistanceHistogramBuffer { uint d[]; };
+NeighborDistanceHistogramBuffer neighbor_distance_histogram =
+	NeighborDistanceHistogramBuffer(scene_desc.gris_neighbor_distance_histogram_addr);
+
+// --- Page-level access locality profiling (debug-only, gated by pc.profile_neighbor_access) ---
+// Unlike record_neighbor_access above (accepted neighbors only), these record *every in-bounds
+// neighbor candidate*, i.e. every index whose reservoir header is actually read from memory --
+// that's the access stream the memory system sees, regardless of resampling acceptance.
+// Neighbor reads are modeled as accesses into a full-resolution reservoir buffer with
+// pc.profile_elem_bytes bytes per pixel (default sizeof(Reservoir) + sizeof(GrisData) = 80, the
+// original non-compacted ReSTIR PT layout), split into pages of pc.page_size_bytes.
+//   PageTouchBitmapBuffer: one bit per page of that modeled buffer, set when any neighbor access
+//     touches it -> frame-wide unique-page coverage.
+//   TilePageBitmapBuffer: per-tile (pc.profile_tile_size ^ 2 pixels) bitmap of touched pages,
+//     stored relative to the tile's base page (the page of the lowest buffer index its pixels can
+//     reach, i.e. column tile_min_col - ceil(spatial_radius)). Accesses outside the fixed window
+//     are counted (not recorded) so the CPU readback can detect an undersized window.
+//   PageStatsBuffer (uints): [0..31] log2 histogram of per-pixel neighbor index footprint
+//     (max - min accessed index, in elements), [32] total recorded accesses, [33] per-tile window
+//     overflow count, [34] max per-pixel footprint.
+#define PAGE_PROFILE_WINDOW_PAGES 2048	// must match ReSTIRPT.h
+#define PAGE_PROFILE_WINDOW_WORDS (PAGE_PROFILE_WINDOW_PAGES / 32)
+#define PAGE_FOOTPRINT_HISTOGRAM_BUCKETS 32
+#define PAGE_STATS_TOTAL_ACCESSES_IDX 32
+#define PAGE_STATS_WINDOW_OVERFLOW_IDX 33
+#define PAGE_STATS_MAX_FOOTPRINT_IDX 34
+layout(buffer_reference, scalar, buffer_reference_align = 4) coherent buffer PageTouchBitmapBuffer { uint d[]; };
+PageTouchBitmapBuffer page_touch_bitmap = PageTouchBitmapBuffer(scene_desc.gris_page_touch_bitmap_addr);
+layout(buffer_reference, scalar, buffer_reference_align = 4) coherent buffer TilePageBitmapBuffer { uint d[]; };
+TilePageBitmapBuffer tile_page_bitmap = TilePageBitmapBuffer(scene_desc.gris_tile_page_bitmap_addr);
+layout(buffer_reference, scalar, buffer_reference_align = 4) coherent buffer PageStatsBuffer { uint d[]; };
+PageStatsBuffer page_stats = PageStatsBuffer(scene_desc.gris_page_stats_addr);
+
+uint page_of(uint elem_idx) { return (elem_idx * pc.profile_elem_bytes) / pc.page_size_bytes; }
+
+// Per-invocation tile constants for the windowed per-tile page bitmap. Tile ids are laid out
+// tile_x * num_tiles_y + tile_y, mirroring the column-major pixel_idx layout.
+uint pp_tile_size = max(pc.profile_tile_size, 1u);
+uint pp_tile_id = (gl_LaunchIDEXT.x / pp_tile_size) * ((gl_LaunchSizeEXT.y + pp_tile_size - 1u) / pp_tile_size) +
+				  (gl_LaunchIDEXT.y / pp_tile_size);
+uint pp_radius = uint(ceil(pc.spatial_radius));
+uint pp_tile_min_col = gl_LaunchIDEXT.x - (gl_LaunchIDEXT.x % pp_tile_size);
+uint pp_tile_base_page = page_of((pp_tile_min_col > pp_radius ? pp_tile_min_col - pp_radius : 0u) * gl_LaunchSizeEXT.y);
+
+void record_neighbor_page_access(uint neighbor_idx) {
+	if (pc.profile_neighbor_access == 0) {
+		return;
+	}
+	atomicAdd(page_stats.d[PAGE_STATS_TOTAL_ACCESSES_IDX], 1u);
+	uint page = page_of(neighbor_idx);
+	atomicOr(page_touch_bitmap.d[page >> 5], 1u << (page & 31u));
+	int rel = int(page) - int(pp_tile_base_page);
+	if (rel >= 0 && rel < PAGE_PROFILE_WINDOW_PAGES) {
+		atomicOr(tile_page_bitmap.d[pp_tile_id * PAGE_PROFILE_WINDOW_WORDS + uint(rel >> 5)], 1u << (uint(rel) & 31u));
+	} else {
+		atomicAdd(page_stats.d[PAGE_STATS_WINDOW_OVERFLOW_IDX], 1u);
+	}
+}
+
+// Call once per pixel after the neighbor loop with the min/max buffer index the loop touched;
+// min > max means no in-bounds neighbor candidate was generated and nothing is recorded.
+void record_neighbor_footprint(uint min_idx, uint max_idx) {
+	if (pc.profile_neighbor_access == 0 || min_idx > max_idx) {
+		return;
+	}
+	uint footprint = max_idx - min_idx;
+	uint bucket =
+		footprint == 0u ? 0u : min(uint(findMSB(footprint)) + 1u, uint(PAGE_FOOTPRINT_HISTOGRAM_BUCKETS - 1));
+	atomicAdd(page_stats.d[bucket], 1u);
+	atomicMax(page_stats.d[PAGE_STATS_MAX_FOOTPRINT_IDX], footprint);
+}
+
+// Only call this once reuse has actually happened (i.e. after the neighbor's data passed all validity
+// checks and was accepted by process_reservoir), not for rejected/skipped neighbor candidates.
+void record_neighbor_access(uint canonical_idx, uint neighbor_idx) {
+	if (pc.profile_neighbor_access == 0) {
+		return;
+	}
+	atomicAdd(neighbor_access_count.d[neighbor_idx], 1u);
+	uint dist = canonical_idx > neighbor_idx ? (canonical_idx - neighbor_idx) : (neighbor_idx - canonical_idx);
+	uint bucket = dist == 0u ? 0u : min(uint(findMSB(dist)) + 1u, uint(NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS - 1));
+	atomicAdd(neighbor_distance_histogram.d[bucket], 1u);
+}
 
 float calc_spatial_importance(Reservoir header) {
 	return max(0.0, header.W * header.target_pdf);
@@ -53,6 +146,87 @@ vec3 reconstruct_without_spatial_reuse(Reservoir header) {
 	return col;
 }
 
+bool spatially_similar(HitData a, HitData b) {
+	float normal_sim = dot(a.n_s, b.n_s);
+	vec3 dist_vec = a.pos - b.pos;
+	float dist_sq = dot(dist_vec, dist_vec);
+
+	// Use a depth-relative distance threshold rather than a fixed fraction of the
+	// scene's world-space extent: neighbors are sampled within a screen-space pixel
+	// radius (get_neighbor_offset), so their plausible world-space separation scales
+	// with how far the canonical hit point is from the camera, not with scene size.
+	const vec3 cam_pos = vec3(ubo.inv_view[3]);
+	const float cam_dist = length(a.pos - cam_pos);
+	const float normal_threshold = 0.9;
+	const float dist_threshold_sq = pow(max(cam_dist, pc.scene_extent * 0.01) * 0.1, 2.0);
+	return normal_sim >= normal_threshold && dist_sq <= dist_threshold_sq;
+}
+
+vec3 reservoir_estimate_at(ivec2 coords, Reservoir header) {
+	if (header.M == 0 || header.W == 0.0) {
+		return vec3(0);
+	}
+	return imageLoad(canonical_contributions_tex, coords).xyz * header.W;
+}
+
+vec3 compose_header_only_color(vec3 reservoir_estimate) {
+	vec3 final_contribution = pc.hide_reconnection_radiance == 1 ? vec3(0) : prefix_contributions.d[pixel_idx];
+	final_contribution += reservoir_estimate;
+
+	vec3 col = final_contribution;
+	if (pc.direct_lighting == 1) {
+		col += imageLoad(direct_lighting_img, ivec2(gl_LaunchIDEXT.xy)).xyz;
+	}
+	return col;
+}
+
+vec3 do_header_only_spatial_reuse(HitData canonical_gbuffer, Reservoir canonical_header) {
+	out_headers[pixel_idx] = canonical_header;
+	out_flags[pixel_idx] = IMPORTANCE_INVALID;
+
+	vec3 estimate_sum = reservoir_estimate_at(ivec2(gl_LaunchIDEXT.xy), canonical_header);
+	float weight_sum = 1.0;
+
+	int num_spatial_samples = pc.enable_spatial_reuse == 1 ? int(pc.num_spatial_samples) : 0;
+	uvec4 neighbor_seed = seed2;
+	uint footprint_min_idx = 0xFFFFFFFFu;
+	uint footprint_max_idx = 0u;
+	for (int i = 0; i < num_spatial_samples; i++) {
+		ivec2 rand_offset = get_neighbor_offset(neighbor_seed);
+		const ivec2 neighbor_coords = ivec2(gl_LaunchIDEXT.xy) + rand_offset;
+		if (any(lessThan(neighbor_coords, ivec2(0))) || any(greaterThanEqual(neighbor_coords, gl_LaunchSizeEXT.xy))) {
+			continue;
+		}
+
+		const uint neighbor_pixel_idx = neighbor_coords.x * pc.size_y + neighbor_coords.y;
+		record_neighbor_page_access(neighbor_pixel_idx);
+		footprint_min_idx = min(footprint_min_idx, neighbor_pixel_idx);
+		footprint_max_idx = max(footprint_max_idx, neighbor_pixel_idx);
+		Reservoir neighbor_header = in_headers[neighbor_pixel_idx];
+		if (neighbor_header.M == 0 || neighbor_header.W == 0.0) {
+			continue;
+		}
+
+		GBuffer neighbor_gbuffer = curr_gbuffers[neighbor_pixel_idx];
+		if (!gbuffer_data_valid(neighbor_gbuffer)) {
+			continue;
+		}
+
+		HitData unpacked_neighbor_gbuffer =
+			get_hitdata(neighbor_gbuffer.barycentrics, neighbor_gbuffer.primitive_instance_id.y,
+						neighbor_gbuffer.primitive_instance_id.x);
+		if (!spatially_similar(canonical_gbuffer, unpacked_neighbor_gbuffer)) {
+			continue;
+		}
+
+		estimate_sum += reservoir_estimate_at(neighbor_coords, neighbor_header);
+		weight_sum += 1.0;
+	}
+	record_neighbor_footprint(footprint_min_idx, footprint_max_idx);
+
+	return compose_header_only_color(estimate_sum / weight_sum);
+}
+
 // TODO: Maybe use an external buffer to supply spatial offsets?
 
 vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
@@ -65,6 +239,9 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 	if (!compact_slot_valid(canonical_slot) || canonical_reservoir.header.W == 0.0 || canonical_reservoir.header.M == 0) {
 		out_headers[pixel_idx] = canonical_reservoir.header;
 		out_flags[pixel_idx] = IMPORTANCE_INVALID;
+		if (canonical_reservoir.header.M > 0 && canonical_reservoir.header.W > 0.0) {
+			return do_header_only_spatial_reuse(canonical_gbuffer, canonical_reservoir.header);
+		}
 		return reconstruct_without_spatial_reuse(canonical_reservoir.header);
 	}
 	canonical_reservoir.data = in_compact_data[canonical_slot];
@@ -77,6 +254,8 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 	float curr_new_partial_jacobian = 0;
 
 	uvec4 neighbor_seed = seed2;
+	uint footprint_min_idx = 0xFFFFFFFFu;
+	uint footprint_max_idx = 0u;
 
 	uint accepted_positions[13];
 	uint num_accepted_positions = 0;
@@ -97,8 +276,11 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 			continue;
 		}
 		const uint neighbor_pixel_idx = neighbor_coords.x * pc.size_y + neighbor_coords.y;
+		record_neighbor_page_access(neighbor_pixel_idx);
+		footprint_min_idx = min(footprint_min_idx, neighbor_pixel_idx);
+		footprint_max_idx = max(footprint_max_idx, neighbor_pixel_idx);
 		Reservoir neighbor_header = in_headers[neighbor_pixel_idx];
-    
+
 		if (neighbor_header.W == 0.0 || neighbor_header.M == 0) continue;
 
 		GBuffer neighbor_gbuffer = curr_gbuffers[neighbor_pixel_idx];
@@ -141,8 +323,10 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 		if (accepted) {
 			curr_new_partial_jacobian = data.new_jacobian;
 			accepted_positions[num_accepted_positions++] = neighbor_pixel_idx;
+			record_neighbor_access(pixel_idx, neighbor_pixel_idx);
 		}
 	}
+	record_neighbor_footprint(footprint_min_idx, footprint_max_idx);
 
 #ifndef ENABLE_DEFENSIVE_PAIRWISE_MIS
 	if (num_valid_samples == 0) {

@@ -3,6 +3,9 @@
 #include "LumenPCH.h"
 #include "ReSTIRPT.h"
 #include <algorithm>
+#include <bit>
+#include <map>
+#include <vector>
 #include <vulkan/vulkan_core.h>
 #include "imgui/imgui.h"
 
@@ -99,6 +102,52 @@ void ReSTIRPT::init() {
 		 .memory_type = vk::BufferType::GPU,
 		 .size = Window::width() * Window::height() * sizeof(ReconnectionData) * (num_spatial_samples + 1)});
 
+	// Spatial reuse neighbor access locality profiling (debug-only, see pc_ray.profile_neighbor_access)
+	gris_neighbor_access_count_buffer =
+		prm::get_buffer({.name = "GRIS Neighbor Access Count",
+						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+								  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+						 .memory_type = vk::BufferType::GPU_TO_CPU,
+						 .size = Window::width() * Window::height() * sizeof(uint32_t)});
+
+	gris_neighbor_distance_histogram_buffer =
+		prm::get_buffer({.name = "GRIS Neighbor Distance Histogram",
+						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+								  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+						 .memory_type = vk::BufferType::GPU_TO_CPU,
+						 .size = NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS * sizeof(uint32_t)});
+
+	// Page-level access locality profiling (see spatial_reuse.rgen). Sized for the worst-case GUI
+	// settings (largest modeled element, smallest page and tile size) so the runtime sliders never
+	// require a reallocation.
+	{
+		const uint64_t total_pixels = uint64_t(Window::width()) * Window::height();
+		const uint64_t max_pages =
+			(total_pixels * PAGE_PROFILE_MAX_ELEM_BYTES + PAGE_PROFILE_MIN_PAGE_SIZE - 1) / PAGE_PROFILE_MIN_PAGE_SIZE;
+		gris_page_touch_bitmap_buffer =
+			prm::get_buffer({.name = "GRIS Page Touch Bitmap",
+							 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+									  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+							 .memory_type = vk::BufferType::GPU_TO_CPU,
+							 .size = ((max_pages + 31) / 32) * sizeof(uint32_t)});
+
+		const uint64_t max_tiles = ((Window::width() + PAGE_PROFILE_MIN_TILE_SIZE - 1) / PAGE_PROFILE_MIN_TILE_SIZE) *
+								   ((Window::height() + PAGE_PROFILE_MIN_TILE_SIZE - 1) / PAGE_PROFILE_MIN_TILE_SIZE);
+		gris_tile_page_bitmap_buffer =
+			prm::get_buffer({.name = "GRIS Tile Page Bitmap",
+							 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+									  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+							 .memory_type = vk::BufferType::GPU_TO_CPU,
+							 .size = max_tiles * PAGE_PROFILE_WINDOW_WORDS * sizeof(uint32_t)});
+
+		gris_page_stats_buffer =
+			prm::get_buffer({.name = "GRIS Page Stats",
+							 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+									  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+							 .memory_type = vk::BufferType::GPU_TO_CPU,
+							 .size = PAGE_STATS_UINT_COUNT * sizeof(uint32_t)});
+	}
+
 	transformations_buffer = prm::get_buffer({
 		.name = "Transformations Buffer",
 		.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
@@ -117,6 +166,11 @@ void ReSTIRPT::init() {
 	desc.transformations_addr = transformations_buffer->get_device_address();
 	desc.prefix_contributions_addr = prefix_contribution_buffer->get_device_address();
 	desc.debug_vis_addr = debug_vis_buffer->get_device_address();
+	desc.gris_neighbor_access_count_addr = gris_neighbor_access_count_buffer->get_device_address();
+	desc.gris_neighbor_distance_histogram_addr = gris_neighbor_distance_histogram_buffer->get_device_address();
+	desc.gris_page_touch_bitmap_addr = gris_page_touch_bitmap_buffer->get_device_address();
+	desc.gris_tile_page_bitmap_addr = gris_tile_page_bitmap_buffer->get_device_address();
+	desc.gris_page_stats_addr = gris_page_stats_buffer->get_device_address();
 
 	lumen_scene->scene_desc_buffer =
 		prm::get_buffer({.name = "Scene Desc",
@@ -146,6 +200,15 @@ void ReSTIRPT::init() {
 	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, compact_vertices_addr, lumen_scene->compact_vertices_buffer,
 								 vk::render_graph());
 	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, debug_vis_addr, debug_vis_buffer, vk::render_graph());
+	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_neighbor_access_count_addr, gris_neighbor_access_count_buffer,
+								 vk::render_graph());
+	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_neighbor_distance_histogram_addr,
+								 gris_neighbor_distance_histogram_buffer, vk::render_graph());
+	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_page_touch_bitmap_addr, gris_page_touch_bitmap_buffer,
+								 vk::render_graph());
+	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_tile_page_bitmap_addr, gris_tile_page_bitmap_buffer,
+								 vk::render_graph());
+	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_page_stats_addr, gris_page_stats_buffer, vk::render_graph());
 
 	path_length = config->path_length;
 }
@@ -184,6 +247,11 @@ void ReSTIRPT::render() {
 	pc_ray.enable_occlusion = enable_occlusion;
 	pc_ray.compact_slot_count =
 		std::max(1u, uint32_t(float(Window::width() * Window::height()) * compact_ratio));
+	pc_ray.profile_neighbor_access = profile_neighbor_access;
+	pc_ray.stable_neighbor_offset = stable_neighbor_offset;
+	pc_ray.page_size_bytes = 1u << uint32_t(page_profile_page_size_log2);
+	pc_ray.profile_elem_bytes = uint32_t(page_profile_elem_bytes);
+	pc_ray.profile_tile_size = 1u << uint32_t(page_profile_tile_log2);
 
 	const std::initializer_list<lumen::ResourceBinding> common_bindings = {
 		output_tex, scene_ubo_buffer, lumen_scene->scene_desc_buffer, lumen_scene->mesh_lights_buffer};
@@ -344,6 +412,11 @@ void ReSTIRPT::render() {
 					.bind(compact_buffers[READ_OR_PREV_IDX])
 					.zero(gris_importance_counter_buffer)
 					.bind(gris_importance_counter_buffer)
+					.zero(gris_neighbor_access_count_buffer)
+					.zero(gris_neighbor_distance_histogram_buffer)
+					.zero(gris_page_touch_bitmap_buffer)
+					.zero(gris_tile_page_bitmap_buffer)
+					.zero(gris_page_stats_buffer)
 					.bind_texture_array(lumen_scene->scene_textures)
 					.bind_tlas(tlas);
 			}
@@ -385,6 +458,171 @@ void ReSTIRPT::render() {
 		
 		vmaUnmapMemory(vk::context().allocator, debug_vis_buffer->allocation);
 	}
+
+	if (pc_ray.profile_neighbor_access) {
+		vkDeviceWaitIdle(vk::context().device);
+		const uint32_t total_pixels = Window::width() * Window::height();
+
+		void* mapped_counts = nullptr;
+		vmaMapMemory(vk::context().allocator, gris_neighbor_access_count_buffer->allocation, &mapped_counts);
+		const uint32_t* access_counts = (const uint32_t*)mapped_counts;
+
+		std::map<uint32_t, uint32_t> access_histogram;	// access count -> number of pixels
+		uint64_t total_accepted_accesses = 0;
+		std::vector<uint8_t> curr_frame_accessed_mask(total_pixels);
+		for (uint32_t i = 0; i < total_pixels; i++) {
+			access_histogram[access_counts[i]]++;
+			total_accepted_accesses += access_counts[i];
+			curr_frame_accessed_mask[i] = access_counts[i] > 0 ? 1 : 0;
+		}
+		vmaUnmapMemory(vk::context().allocator, gris_neighbor_access_count_buffer->allocation);
+
+		LUMEN_TRACE("=== Spatial reuse neighbor access count distribution ({} total accepted accesses) ===",
+					total_accepted_accesses);
+		for (const auto& [access_count, pixel_count] : access_histogram) {
+			LUMEN_TRACE("  accessed {} time(s): {} pixels ({:.2f}%)", access_count, pixel_count,
+						pixel_count * 100.0f / total_pixels);
+		}
+
+		// Frame-to-frame access pattern stability: compare this frame's accessed/unaccessed mask
+		// against the mask captured last time profiling ran (skipped on the first profiled frame,
+		// or right after a resolution change, since there's no comparable previous mask yet).
+		if (prev_frame_accessed_mask.size() == total_pixels) {
+			uint64_t curr_accessed = 0, curr_unaccessed = 0;
+			uint64_t accessed_overlap = 0, unaccessed_overlap = 0;
+			for (uint32_t i = 0; i < total_pixels; i++) {
+				if (curr_frame_accessed_mask[i]) {
+					curr_accessed++;
+					accessed_overlap += prev_frame_accessed_mask[i];
+				} else {
+					curr_unaccessed++;
+					unaccessed_overlap += prev_frame_accessed_mask[i] == 0 ? 1 : 0;
+				}
+			}
+			LUMEN_TRACE("=== Spatial reuse neighbor access frame-to-frame stability ===");
+			LUMEN_TRACE("  of {} accessed pixels this frame, {} ({:.2f}%) were also accessed last frame",
+						curr_accessed, accessed_overlap,
+						curr_accessed > 0 ? accessed_overlap * 100.0f / curr_accessed : 0.0f);
+			LUMEN_TRACE("  of {} unaccessed pixels this frame, {} ({:.2f}%) were also unaccessed last frame",
+						curr_unaccessed, unaccessed_overlap,
+						curr_unaccessed > 0 ? unaccessed_overlap * 100.0f / curr_unaccessed : 0.0f);
+		}
+		prev_frame_accessed_mask = std::move(curr_frame_accessed_mask);
+
+		void* mapped_hist = nullptr;
+		vmaMapMemory(vk::context().allocator, gris_neighbor_distance_histogram_buffer->allocation, &mapped_hist);
+		const uint32_t* dist_buckets = (const uint32_t*)mapped_hist;
+
+		uint64_t total_dist_events = 0;
+		for (uint32_t b = 0; b < NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS; b++) {
+			total_dist_events += dist_buckets[b];
+		}
+		LUMEN_TRACE("=== Spatial reuse neighbor buffer-index distance distribution ({} events) ===",
+					total_dist_events);
+		for (uint32_t b = 0; b < NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS; b++) {
+			if (dist_buckets[b] == 0) continue;
+			uint32_t lo = b == 0 ? 0u : (1u << (b - 1));
+			uint32_t hi = (1u << b) - 1u;
+			LUMEN_TRACE("  |index distance| in [{}, {}]: {} events ({:.2f}%)", lo, hi, dist_buckets[b],
+						total_dist_events > 0 ? dist_buckets[b] * 100.0f / total_dist_events : 0.0f);
+		}
+		vmaUnmapMemory(vk::context().allocator, gris_neighbor_distance_histogram_buffer->allocation);
+
+		// --- Page-level access locality (see spatial_reuse.rgen page profiling comment) ---
+		const uint32_t page_size_bytes = pc_ray.page_size_bytes;
+		const uint32_t elem_bytes = pc_ray.profile_elem_bytes;
+		const uint32_t tile_size = pc_ray.profile_tile_size;
+		const uint32_t num_pages =
+			uint32_t((uint64_t(total_pixels) * elem_bytes + page_size_bytes - 1) / page_size_bytes);
+
+		void* mapped_stats = nullptr;
+		vmaMapMemory(vk::context().allocator, gris_page_stats_buffer->allocation, &mapped_stats);
+		const uint32_t* page_stats = (const uint32_t*)mapped_stats;
+		const uint64_t total_page_accesses = page_stats[PAGE_STATS_TOTAL_ACCESSES_IDX];
+		const uint32_t window_overflow = page_stats[PAGE_STATS_WINDOW_OVERFLOW_IDX];
+		const uint32_t max_footprint = page_stats[PAGE_STATS_MAX_FOOTPRINT_IDX];
+
+		const uint32_t radius = uint32_t(std::ceil(spatial_reuse_radius));
+		const uint64_t footprint_bound = uint64_t(2) * radius * Window::height() + 2 * radius;
+		LUMEN_TRACE("=== Page-level locality (elem {} B, page {} B -> {} elems/page, buffer {} pages, tile {}x{}) ===",
+					elem_bytes, page_size_bytes, page_size_bytes / elem_bytes, num_pages, tile_size, tile_size);
+		LUMEN_TRACE("  {} neighbor accesses; footprint bound 2*R*size_y+2*R = {} elems ({:.1f} pages), observed max {} elems ({:.1f} pages)",
+					total_page_accesses, footprint_bound,
+					double(footprint_bound) * elem_bytes / page_size_bytes, max_footprint,
+					double(max_footprint) * elem_bytes / page_size_bytes);
+
+		uint64_t footprint_events = 0;
+		for (uint32_t b = 0; b < PAGE_FOOTPRINT_HISTOGRAM_BUCKETS; b++) {
+			footprint_events += page_stats[b];
+		}
+		LUMEN_TRACE("  per-pixel buffer-index footprint (max - min accessed index, {} pixels with accesses):",
+					footprint_events);
+		for (uint32_t b = 0; b < PAGE_FOOTPRINT_HISTOGRAM_BUCKETS; b++) {
+			if (page_stats[b] == 0) continue;
+			uint32_t lo = b == 0 ? 0u : (1u << (b - 1));
+			uint32_t hi = (1u << b) - 1u;
+			LUMEN_TRACE("    footprint in [{}, {}] elems (<= {:.1f} pages): {} pixels ({:.2f}%)", lo, hi,
+						double(hi) * elem_bytes / page_size_bytes, page_stats[b],
+						footprint_events > 0 ? page_stats[b] * 100.0 / footprint_events : 0.0);
+		}
+		vmaUnmapMemory(vk::context().allocator, gris_page_stats_buffer->allocation);
+
+		// Frame-wide unique page coverage
+		void* mapped_page_bitmap = nullptr;
+		vmaMapMemory(vk::context().allocator, gris_page_touch_bitmap_buffer->allocation, &mapped_page_bitmap);
+		const uint32_t* page_bitmap = (const uint32_t*)mapped_page_bitmap;
+		uint64_t frame_unique_pages = 0;
+		for (uint32_t w = 0; w < (num_pages + 31) / 32; w++) {
+			frame_unique_pages += std::popcount(page_bitmap[w]);
+		}
+		vmaUnmapMemory(vk::context().allocator, gris_page_touch_bitmap_buffer->allocation);
+		LUMEN_TRACE("  frame coverage: {} / {} pages touched by neighbor accesses ({:.2f}%)", frame_unique_pages,
+					num_pages, num_pages > 0 ? frame_unique_pages * 100.0 / num_pages : 0.0);
+
+		// Per-tile unique page count distribution
+		const uint32_t tiles_x = (Window::width() + tile_size - 1) / tile_size;
+		const uint32_t tiles_y = (Window::height() + tile_size - 1) / tile_size;
+		const uint32_t num_tiles = tiles_x * tiles_y;
+		void* mapped_tile_bitmap = nullptr;
+		vmaMapMemory(vk::context().allocator, gris_tile_page_bitmap_buffer->allocation, &mapped_tile_bitmap);
+		const uint32_t* tile_bitmap = (const uint32_t*)mapped_tile_bitmap;
+		std::vector<uint32_t> tile_unique_pages;
+		tile_unique_pages.reserve(num_tiles);
+		uint32_t tiles_without_accesses = 0;
+		uint64_t tile_pages_sum = 0;
+		for (uint32_t t = 0; t < num_tiles; t++) {
+			uint32_t unique = 0;
+			for (uint32_t w = 0; w < PAGE_PROFILE_WINDOW_WORDS; w++) {
+				unique += std::popcount(tile_bitmap[t * PAGE_PROFILE_WINDOW_WORDS + w]);
+			}
+			if (unique == 0) {
+				tiles_without_accesses++;
+			} else {
+				tile_unique_pages.push_back(unique);
+				tile_pages_sum += unique;
+			}
+		}
+		vmaUnmapMemory(vk::context().allocator, gris_tile_page_bitmap_buffer->allocation);
+
+		if (!tile_unique_pages.empty()) {
+			std::sort(tile_unique_pages.begin(), tile_unique_pages.end());
+			auto percentile = [&](uint32_t p) {
+				return tile_unique_pages[size_t(tile_unique_pages.size() - 1) * p / 100];
+			};
+			LUMEN_TRACE(
+				"  unique pages per {}x{} tile: min {}, p10 {}, median {}, p90 {}, max {}, mean {:.1f} "
+				"({} active tiles, {} without accesses, buffer total {} pages)",
+				tile_size, tile_size, tile_unique_pages.front(), percentile(10), percentile(50), percentile(90),
+				tile_unique_pages.back(), double(tile_pages_sum) / tile_unique_pages.size(),
+				uint32_t(tile_unique_pages.size()), tiles_without_accesses, num_pages);
+		}
+		if (window_overflow > 0) {
+			LUMEN_TRACE(
+				"  WARNING: {} accesses fell outside the {}-page per-tile window -- per-tile stats undercount; "
+				"lower elem bytes / raise page size, or grow PAGE_PROFILE_WINDOW_PAGES",
+				window_overflow, PAGE_PROFILE_WINDOW_PAGES);
+		}
+	}
 }
 
 bool ReSTIRPT::update() {
@@ -410,7 +648,12 @@ void ReSTIRPT::destroy() {
 						prefix_contribution_buffer,
 						reconnection_buffer,
 						gris_prev_gbuffer,
-						debug_vis_buffer};
+						debug_vis_buffer,
+						gris_neighbor_access_count_buffer,
+						gris_neighbor_distance_histogram_buffer,
+						gris_page_touch_bitmap_buffer,
+						gris_tile_page_bitmap_buffer,
+						gris_page_stats_buffer};
 	for (vk::Buffer* b : buffer_list) {
 		prm::remove(b);
 	}
@@ -451,6 +694,14 @@ bool ReSTIRPT::gui() {
 	result |= ImGui::Checkbox("Enable occlusion", &enable_occlusion);
 	result |= ImGui::Checkbox("Temporal jitter", &enable_temporal_jitter);
 	result |= ImGui::Checkbox("Debug pixels", &pixel_debug);
+	ImGui::Checkbox("Profile spatial reuse neighbor access", &profile_neighbor_access);
+	if (profile_neighbor_access) {
+		ImGui::SliderInt("Page size (log2 bytes)", &page_profile_page_size_log2, 10, 16);
+		ImGui::SliderInt("Modeled reservoir elem (bytes)", &page_profile_elem_bytes, 16,
+						 int(PAGE_PROFILE_MAX_ELEM_BYTES));
+		ImGui::SliderInt("Profiling tile size (log2 px)", &page_profile_tile_log2, 3, 6);
+	}
+	result |= ImGui::Checkbox("Stable neighbor offset (cross-frame fixed)", &stable_neighbor_offset);
 	result |= ImGui::Checkbox("Enable defensive formulation", &enable_defensive_formulation);
 	result |= ImGui::Checkbox("Enable permutation sampling", &enable_permutation_sampling);
 	result |= ImGui::Checkbox("Enable spatial reuse", &enable_spatial_reuse);

@@ -39,16 +39,24 @@ bool _enable_validation_layers;
 VkDescriptorPool _imgui_pool = 0;
 
 static std::vector<const char*> get_req_extensions() {
-	uint32_t glfwExtensionCount = 0;
-	const char** glfwExtensions;
-	glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-
-	std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+	std::vector<const char*> extensions;
+	if (!Window::is_headless()) {
+		// Surface / platform instance extensions are only needed when we present.
+		uint32_t glfwExtensionCount = 0;
+		const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+		extensions.assign(glfwExtensions, glfwExtensions + glfwExtensionCount);
+	}
 
 	if (_enable_validation_layers) {
 		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	}
 	return extensions;
+}
+
+// Headless has no surface, so a present family is neither available nor required.
+static bool queues_complete(const QueueFamilyIndices& indices) {
+	bool base = indices.gfx_family.has_value() && indices.compute_family.has_value();
+	return Window::is_headless() ? base : (base && indices.present_family.has_value());
 }
 
 static QueueFamilyIndices find_queue_families(VkPhysicalDevice device) {
@@ -68,14 +76,16 @@ static QueueFamilyIndices find_queue_families(VkPhysicalDevice device) {
 			indices.compute_family = i;
 		}
 
-		VkBool32 present_support = false;
-		vkGetPhysicalDeviceSurfaceSupportKHR(device, i, context().surface, &present_support);
+		if (!Window::is_headless()) {
+			VkBool32 present_support = false;
+			vkGetPhysicalDeviceSurfaceSupportKHR(device, i, context().surface, &present_support);
 
-		if (present_support) {
-			indices.present_family = i;
+			if (present_support) {
+				indices.present_family = i;
+			}
 		}
 
-		if (indices.is_complete()) {
+		if (queues_complete(indices)) {
 			break;
 		}
 
@@ -251,16 +261,19 @@ static void pick_physical_device() {
 			return required_extensions.empty();
 		}(device);
 
-		// Query swaphcain support
+		// Query swaphcain support. In headless there is no surface to query, and
+		// swapchain adequacy is irrelevant since we never present.
 		bool swapchain_adequate = false;
-		if (extensions_supported) {
+		if (Window::is_headless()) {
+			swapchain_adequate = true;
+		} else if (extensions_supported) {
 			SwapChainSupportDetails swapchain_support = query_swapchain_support(device);
 			// If we have a format and present mode, it's adequate
 			swapchain_adequate = !swapchain_support.formats.empty() && !swapchain_support.present_modes.empty();
 		}
 		// If we have the appropiate queue families, extensions and adequate
 		// swapchain, return true
-		return indices.is_complete() && extensions_supported && swapchain_adequate;
+		return queues_complete(indices) && extensions_supported && swapchain_adequate;
 	};
 	for (const auto& device : devices) {
 		if (is_suitable(device)) {
@@ -285,12 +298,14 @@ static void create_logical_device() {
 
 	std::vector<VkDeviceQueueCreateInfo> queue_CIs;
 	std::unordered_set<uint32_t> unique_queue_families = {context().queue_indices.gfx_family.value(),
-														  context().queue_indices.present_family.value(),
 														  context().queue_indices.compute_family.value()};
+	// Present family is absent in headless mode.
+	if (context().queue_indices.present_family.has_value()) {
+		unique_queue_families.insert(context().queue_indices.present_family.value());
+	}
 
-	context().queues.resize(context().queue_indices.gfx_family.has_value() +
-							context().queue_indices.present_family.has_value() +
-							context().queue_indices.compute_family.has_value());
+	// One slot per QueueType (GFX, COMPUTE, PRESENT); PRESENT stays null in headless.
+	context().queues.resize(3);
 	float queue_priority = 1.0f;
 	for (uint32_t queue_family_idx : unique_queue_families) {
 		VkDeviceQueueCreateInfo queue_CI{};
@@ -383,8 +398,10 @@ static void create_logical_device() {
 					 &context().queues[(int)QueueType::GFX]);
 	vkGetDeviceQueue(context().device, context().queue_indices.compute_family.value(), 0,
 					 &context().queues[(int)QueueType::COMPUTE]);
-	vkGetDeviceQueue(context().device, context().queue_indices.present_family.value(), 0,
-					 &context().queues[(int)QueueType::PRESENT]);
+	if (context().queue_indices.present_family.has_value()) {
+		vkGetDeviceQueue(context().device, context().queue_indices.present_family.value(), 0,
+						 &context().queues[(int)QueueType::PRESENT]);
+	}
 }
 
 static void create_swapchain(VkSwapchainKHR old_swapchain = VK_NULL_HANDLE) {
@@ -503,7 +520,9 @@ static void create_command_pools() {
 }
 
 static void create_command_buffers() {
-	context().command_buffers.resize(_swapchain_images.size());
+	// No swapchain images in headless; use one command buffer per frame in flight.
+	size_t command_buffer_cnt = Window::is_headless() ? MAX_FRAMES_IN_FLIGHT : _swapchain_images.size();
+	context().command_buffers.resize(command_buffer_cnt);
 	// TODO: Factor
 	// 0 is for the main thread
 	VkCommandBufferAllocateInfo alloc_info = command_buffer_allocate_info(
@@ -531,7 +550,7 @@ static void create_sync_primitives() {
 }
 
 // Called after window resize
-static void recreate_swap_chain() {
+void recreate_swapchain() {
 	int width = 0, height = 0;
 	glfwGetFramebufferSize(Window::get()->window_handle, &width, &height);
 	while (width == 0 || height == 0) {
@@ -619,15 +638,21 @@ static VkQueryPool create_query_pool(VkQueryType query_type, uint32_t count) {
 void init(bool validation_layers) {
 	_enable_validation_layers = validation_layers;
 	create_instance();
-	create_surface();
+	if (!Window::is_headless()) {
+		create_surface();
+	}
 	pick_physical_device();
 	create_logical_device();
 	create_allocator();
-	create_swapchain();
+	if (!Window::is_headless()) {
+		create_swapchain();
+	}
 	create_command_pools();
 	create_command_buffers();
 	create_sync_primitives();
-	init_imgui();
+	if (!Window::is_headless()) {
+		init_imgui();
+	}
 	context().query_pool_timestamps[0] = create_query_pool(VK_QUERY_TYPE_TIMESTAMP, 4096);
 	context().query_pool_timestamps[1] = create_query_pool(VK_QUERY_TYPE_TIMESTAMP, 4096);
 	context().query_pool_timestamps[2] = create_query_pool(VK_QUERY_TYPE_TIMESTAMP, 4096);
@@ -697,6 +722,14 @@ std::vector<Texture*>& swapchain_images() { return _swapchain_images; }
 uint32_t prepare_frame() {
 	check(vkWaitForFences(context().device, 1, &_in_flight_fences[current_frame], VK_TRUE, ~0ull), "Timeout");
 
+	if (Window::is_headless()) {
+		// No swapchain to acquire from; just recycle the command buffer for this frame slot.
+		vkResetFences(context().device, 1, &_in_flight_fences[current_frame]);
+		check(vkResetCommandBuffer(context().command_buffers[current_frame], 0));
+		GPUQueryManager::collect(uint32_t(current_frame));
+		return uint32_t(current_frame);
+	}
+
 	uint32_t image_idx;
 	VkResult result = vkAcquireNextImageKHR(context().device, context().swapchain, UINT64_MAX,
 											_image_available_sem[current_frame], VK_NULL_HANDLE, &image_idx);
@@ -715,6 +748,17 @@ uint32_t prepare_frame() {
 }
 
 VkResult submit_frame(uint32_t image_idx) {
+	if (Window::is_headless()) {
+		// No semaphores / presentation; submit and let the fence gate the next frame.
+		VkSubmitInfo submit_info = vk::submit_info();
+		submit_info.commandBufferCount = 1;
+		submit_info.pCommandBuffers = &context().command_buffers[image_idx];
+		check(vkQueueSubmit(context().queues[(int)QueueType::GFX], 1, &submit_info, _in_flight_fences[current_frame]),
+			  "Failed to submit command buffer");
+		current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+		return VK_SUCCESS;
+	}
+
 	VkSubmitInfo submit_info = vk::submit_info();
 	VkSemaphore wait_semaphores[] = {_image_available_sem[current_frame]};
 	VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
@@ -747,7 +791,7 @@ VkResult submit_frame(uint32_t image_idx) {
 	VkResult result = vkQueuePresentKHR(context().queues[(int)QueueType::GFX], &present_info);
 	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
 		vkDeviceWaitIdle(context().device);
-		recreate_swap_chain();
+		recreate_swapchain();
 		return result;
 	} else if (result != VK_SUCCESS) {
 		LUMEN_ERROR("Failed to present swap chain image");

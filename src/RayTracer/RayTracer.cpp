@@ -11,6 +11,16 @@ RayTracer* RayTracer::instance = nullptr;
 bool load_reference = false;
 bool calc_rmse = false;
 
+// glfwGetTime() requires GLFW to be initialized, which it is not in headless mode,
+// so fall back to a std::chrono based clock there.
+static double now_ms() {
+	if (Window::is_headless()) {
+		using namespace std::chrono;
+		return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+	}
+	return glfwGetTime() * 1000.0;
+}
+
 RayTracer::RayTracer(bool debug, int argc, char* argv[]) : debug(debug) {
 	instance = this;
 	parse_args(argc, argv);
@@ -180,13 +190,17 @@ void RayTracer::update() {
 
 void RayTracer::render(uint32_t i) {
 	integrator->render();
-	vk::Texture* input_tex = nullptr;
-	if (comparison_mode && img_captured) {
-		input_tex = comparison_img_toggle ? target_tex : reference_tex;
-	} else {
-		input_tex = integrator->output_tex;
+	// Post FX renders (and blits ImGui) into the swapchain image for display.
+	// Headless has no swapchain; the EXR is taken straight from output_tex below.
+	if (!Window::is_headless()) {
+		vk::Texture* input_tex = nullptr;
+		if (comparison_mode && img_captured) {
+			input_tex = comparison_img_toggle ? target_tex : reference_tex;
+		} else {
+			input_tex = integrator->output_tex;
+		}
+		post_fx.render(input_tex, vk::swapchain_images()[i]);
 	}
-	post_fx.render(input_tex, vk::swapchain_images()[i]);
 	render_debug_utils();
 
 	auto cmdbuf = vk::context().command_buffers[i];
@@ -381,65 +395,90 @@ bool RayTracer::gui() {
 	return updated;
 }
 
+bool RayTracer::resize_if_needed() {
+	int width = 0;
+	int height = 0;
+	glfwGetWindowSize(Window::get()->window_handle, &width, &height);
+	if (width == 0 || height == 0) {
+		return true;
+	}
+	if (uint32_t(width) == Window::width() && uint32_t(height) == Window::height()) {
+		return false;
+	}
+
+	vkDeviceWaitIdle(vk::context().device);
+	vk::render_graph()->reset();
+
+	cleanup_resources();
+	integrator->destroy();
+	post_fx.destroy();
+	vk::destroy_imgui();
+
+	Window::update_window_size();
+	vk::recreate_swapchain();
+
+	const float aspect_ratio = float(Window::width()) / float(Window::height());
+	const PerspectiveCamera* old_cam = static_cast<PerspectiveCamera*>(scene.camera.get());
+	glm::vec3 old_rotation = old_cam->rotation;
+	scene.camera = std::make_unique<lumen::PerspectiveCamera>(old_cam->fov, 0.01f, 1000.0f, aspect_ratio,
+															  old_cam->direction, old_cam->position);
+	scene.camera->rotation = old_rotation;
+
+	integrator->init();
+	post_fx.init();
+	init_resources();
+	vk::init_imgui();
+	integrator->updated = true;
+	return true;
+}
+
 float RayTracer::draw_frame() {
 	if (cnt == 0) {
 		start = clock();
 	}
 
-	auto resize_func = [this]() {
-
-	};
-	auto t_begin = glfwGetTime() * 1000;
+	const bool headless = Window::is_headless();
+	auto t_begin = now_ms();
 	bool updated = false;
+	if (!headless && resize_if_needed()) {
+		auto t_end = now_ms();
+		return float(t_end - t_begin);
+	}
 	uint32_t image_idx = vk::prepare_frame();
 	if (image_idx == UINT32_MAX) {
-		auto t_end = glfwGetTime() * 1000;
+		auto t_end = now_ms();
 		auto t_diff = t_end - t_begin;
 		return (float)t_diff;
 	}
-	ImGui_ImplVulkan_NewFrame();
-	ImGui_ImplGlfw_NewFrame();
-	ImGui::NewFrame();
+	if (!headless) {
+		ImGui_ImplVulkan_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
 
-	integrator->updated |= updated;
-	if (show_ui) {
-		ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Once);
-		ImGui::Begin("Debug (F1 to hide)", &show_ui);
-		bool gui_updated = gui();
-		gui_updated |= integrator->gui();
-		gui_updated |= post_fx.gui();
-		static bool show_imgui_demo = false;
-		if (ImGui::Button("Show ImGui Demo")) {
-			show_imgui_demo = !show_imgui_demo;
+		integrator->updated |= updated;
+		if (show_ui) {
+			ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Once);
+			ImGui::Begin("Debug (F1 to hide)", &show_ui);
+			bool gui_updated = gui();
+			gui_updated |= integrator->gui();
+			gui_updated |= post_fx.gui();
+			static bool show_imgui_demo = false;
+			if (ImGui::Button("Show ImGui Demo")) {
+				show_imgui_demo = !show_imgui_demo;
+			}
+			if (show_imgui_demo) {
+				ImGui::ShowDemoWindow(&show_imgui_demo);
+			}
+			ImGui::End();
+			integrator->updated |= gui_updated;
 		}
-		if (show_imgui_demo) {
-			ImGui::ShowDemoWindow(&show_imgui_demo);
-		}
-		ImGui::End();
-		integrator->updated |= gui_updated;
 	}
 
 	render(image_idx);
 	VkResult result = vk::submit_frame(image_idx);
 	vk::render_graph()->reset();
-	if (result != VK_SUCCESS) {
-		Window::update_window_size();
-		const float aspect_ratio = (float)Window::width() / Window::height();
-		const PerspectiveCamera* old_cam = (PerspectiveCamera*)scene.camera.get();
-		glm::vec3 old_rotation = old_cam->rotation;
-		scene.camera = std::unique_ptr<lumen::PerspectiveCamera>(new lumen::PerspectiveCamera(
-			old_cam->fov, 0.01f, 1000.0f, aspect_ratio, old_cam->direction, old_cam->position));
-		scene.camera->rotation = old_rotation;
-		cleanup_resources();
-		integrator->destroy();
-		post_fx.destroy();
-		vk::destroy_imgui();
-
-		integrator->init();
-		post_fx.init();
-		init_resources();
-		vk::init_imgui();
-		integrator->updated = true;
+	if (!headless && result != VK_SUCCESS) {
+		resize_if_needed();
 	}
 
 	auto now = clock();
@@ -448,7 +487,7 @@ float RayTracer::draw_frame() {
 	if (write_exr && (integrator->frame_num % 5 == 0 || integrator->frame_num < 10) && integrator->frame_num < 500) {
 		// write_exr = false;
 		vkDeviceWaitIdle(vk::context().device);
-		std::string filename = "output/path_dep10_output/out_" + std::to_string(integrator->frame_num) + ".exr";
+		std::string filename = "output/restirpt_small_buf_output/out_" + std::to_string(integrator->frame_num) + ".exr";
 		ImageUtils::save_exr((float*)vk::map_buffer(output_img_buffer_cpu), Window::width(), Window::height(),
 							 filename.c_str());
 		vk::unmap_buffer(output_img_buffer_cpu);
@@ -462,7 +501,7 @@ float RayTracer::draw_frame() {
 		LUMEN_TRACE("RMSE {}", rmse * 1e6);
 		start = now;
 	}
-	auto t_end = glfwGetTime() * 1000;
+	auto t_end = now_ms();
 	auto t_diff = t_end - t_begin;
 	cnt++;
 	return (float)t_diff;
@@ -477,6 +516,16 @@ void RayTracer::parse_args(int argc, char* argv[]) {
 		}
 	}
 }
+void RayTracer::save_output(const std::string& path) {
+	// render_debug_utils() copies output_tex -> output_img_buffer_cpu every frame
+	// (write_exr defaults to true), so the CPU buffer holds the latest frame once
+	// the device is idle.
+	vkDeviceWaitIdle(vk::context().device);
+	ImageUtils::save_exr((float*)vk::map_buffer(output_img_buffer_cpu), Window::width(), Window::height(),
+						 path.c_str());
+	vk::unmap_buffer(output_img_buffer_cpu);
+}
+
 void RayTracer::destroy_accel() {
 	if (tlas.accel) {
 		prm::remove(tlas.buffer);
@@ -499,7 +548,9 @@ void RayTracer::cleanup() {
 		post_fx.destroy();
 		scene.destroy();
 		destroy_accel();
-		vk::destroy_imgui();
+		if (!Window::is_headless()) {
+			vk::destroy_imgui();
+		}
 		vk::cleanup();
 	}
 }

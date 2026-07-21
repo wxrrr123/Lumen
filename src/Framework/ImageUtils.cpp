@@ -20,6 +20,13 @@ float* load_exr(const char* img_name, int& width, int& height) {
 }
 
 void save_exr(const float* rgb, int width, int height, const char* outfilename) {
+	// Make sure the destination directory exists; SaveEXRImageToFile fails otherwise.
+	std::filesystem::path out_path(outfilename);
+	if (out_path.has_parent_path()) {
+		std::error_code ec;
+		std::filesystem::create_directories(out_path.parent_path(), ec);
+	}
+
 	EXRHeader header;
 	InitEXRHeader(&header);
 	EXRImage image;

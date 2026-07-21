@@ -74,6 +74,18 @@ struct OcclusionData {
 	float dir_length;
 };
 
+// Base seed component fed into init_rng() for the per-pixel RNG state that drives spatial reuse
+// neighbor selection (see seed2 in {retrace_paths,validate_samples,spatial_reuse}.rgen). Normally
+// this is pc.seed2, a value that's re-randomized every frame, so a given pixel picks a different
+// neighbor offset each frame. When pc.stable_neighbor_offset is set, this returns a fixed constant
+// instead, so the resulting seed2 = init_rng(pixel_coords, resolution, <this>) depends only on the
+// pixel's own coordinates and is identical every frame -- i.e. each pixel always reuses the same
+// neighbor(s). This is profiling/experimentation-only; it does not change anything else about the
+// resampling math.
+uint neighbor_offset_seed_base() {
+	return pc.stable_neighbor_offset == 1 ? 0u : pc.seed2;
+}
+
 ivec2 get_neighbor_offset(inout uvec4 seed) {
 	const float randa = rand(seed) * 2 * PI;
 	const float randr = sqrt(rand(seed)) * pc.spatial_radius;
