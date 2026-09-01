@@ -33,6 +33,16 @@ const float tmax = 10000.0;
 #define RR_MIN_DEPTH 3
 uint pixel_idx = (gl_LaunchIDEXT.x * gl_LaunchSizeEXT.y + gl_LaunchIDEXT.y);
 
+#ifdef PROFILE_REPLAY_RAY_COUNT
+// Per-invocation (per-thread) counters for M4: how many real traceRayEXT calls a single
+// retrace_paths()/advance_paths() call actually issues. Zeroed by retrace_paths.rgen before
+// each call, read back and written to a buffer after. Guarded so gris.rgen/temporal_reuse.rgen/
+// validate_samples.rgen/spatial_reuse.rgen (none of which define PROFILE_REPLAY_RAY_COUNT
+// before including this file) are byte-for-byte unaffected.
+uint g_replay_ray_count = 0;
+uint g_replay_shadow_ray_count = 0;
+#endif
+
 #define RECONNECTION_TYPE_INVALID 0
 #define RECONNECTION_TYPE_NEE 1
 #define RECONNECTION_TYPE_EMISSIVE_AFTER_RC 2
@@ -567,6 +577,9 @@ bool advance_paths(in HitData dst_gbuffer, in GrisData data, vec3 dst_wi, float 
 		prefix_throughput *= f * abs(cos_theta) / pdf;
 
 		traceRayEXT(tlas, flags, 0xFF, 0, 0, 0, dst_gbuffer.pos, tmin, dst_wi, tmax, 0);
+#ifdef PROFILE_REPLAY_RAY_COUNT
+		g_replay_ray_count++;
+#endif
 		const bool found_isect = payload.instance_idx != -1;
 		if (!found_isect) {
 			return false;
@@ -588,6 +601,9 @@ bool retrace_paths(in HitData dst_gbuffer, in GrisData data, vec3 dst_wi, float 
 		any_hit_payload.hit = 1;
 		traceRayEXT(tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT, 0xFF, 1, 0, 1,
 					occlusion_data.origin, 0, occlusion_data.dir, occlusion_data.dir_length - EPS, 1);
+#ifdef PROFILE_REPLAY_RAY_COUNT
+		g_replay_shadow_ray_count++;
+#endif
 		if (any_hit_payload.hit == 1) {
 			jacobian_out = 0;
 			reservoir_contribution = vec3(0);

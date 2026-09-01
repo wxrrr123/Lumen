@@ -115,6 +115,22 @@ void ReSTIRPT::init() {
 						 .memory_type = vk::BufferType::GPU_TO_CPU,
 						 .size = NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS * sizeof(uint32_t)});
 
+	// M4: per-pixel-neighbor-pair replay ray count (retrace_paths.rgen only, see
+	// gris_commons.glsl PROFILE_REPLAY_RAY_COUNT). Same (N+1)-slots-per-pixel layout as
+	// reconnection_buffer, so it needs the same resize-on-N-change treatment (see gui()).
+	gris_replay_ray_count_buffer =
+		prm::get_buffer({.name = "GRIS Replay Ray Count",
+						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+								  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+						 .memory_type = vk::BufferType::GPU_TO_CPU,
+						 .size = Window::width() * Window::height() * (num_spatial_samples + 1) * sizeof(uint32_t)});
+	gris_replay_shadow_ray_count_buffer =
+		prm::get_buffer({.name = "GRIS Replay Shadow Ray Count",
+						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+								  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+						 .memory_type = vk::BufferType::GPU_TO_CPU,
+						 .size = Window::width() * Window::height() * (num_spatial_samples + 1) * sizeof(uint32_t)});
+
 	transformations_buffer = prm::get_buffer({
 		.name = "Transformations Buffer",
 		.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
@@ -135,6 +151,8 @@ void ReSTIRPT::init() {
 	desc.debug_vis_addr = debug_vis_buffer->get_device_address();
 	desc.gris_neighbor_access_count_addr = gris_neighbor_access_count_buffer->get_device_address();
 	desc.gris_neighbor_distance_histogram_addr = gris_neighbor_distance_histogram_buffer->get_device_address();
+	desc.gris_replay_ray_count_addr = gris_replay_ray_count_buffer->get_device_address();
+	desc.gris_replay_shadow_ray_count_addr = gris_replay_shadow_ray_count_buffer->get_device_address();
 
 	lumen_scene->scene_desc_buffer =
 		prm::get_buffer({.name = "Scene Desc",
@@ -168,8 +186,15 @@ void ReSTIRPT::init() {
 								 vk::render_graph());
 	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_neighbor_distance_histogram_addr,
 								 gris_neighbor_distance_histogram_buffer, vk::render_graph());
+	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_replay_ray_count_addr, gris_replay_ray_count_buffer,
+								 vk::render_graph());
+	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_replay_shadow_ray_count_addr,
+								 gris_replay_shadow_ray_count_buffer, vk::render_graph());
 
-	path_length = config->path_length;
+	path_length = getenv("LUMEN_PATH_LENGTH") ? atoi(getenv("LUMEN_PATH_LENGTH")) : config->path_length;
+	if (getenv("LUMEN_MIN_VERTEX_DISTANCE_RATIO")) {
+		min_vertex_distance_ratio = (float)atof(getenv("LUMEN_MIN_VERTEX_DISTANCE_RATIO"));
+	}
 }
 
 void ReSTIRPT::render() {
@@ -207,6 +232,13 @@ void ReSTIRPT::render() {
 	pc_ray.compact_slot_count =
 		std::max(1u, uint32_t(float(Window::width() * Window::height()) * compact_ratio));
 	pc_ray.profile_neighbor_access = profile_neighbor_access;
+	if (frame_num == 0) {
+		LUMEN_TRACE(
+			"[RUNTIME CHECK] num_spatial_samples={} enable_spatial_reuse={} max_depth={} "
+			"enable_temporal_reuse={} profile_neighbor_access={} enable_gris={}",
+			pc_ray.num_spatial_samples, pc_ray.enable_spatial_reuse, pc_ray.max_depth,
+			pc_ray.temporal_reuse, pc_ray.profile_neighbor_access, pc_ray.enable_gris);
+	}
 	pc_ray.stable_neighbor_offset = stable_neighbor_offset;
 
 	const std::initializer_list<lumen::ResourceBinding> common_bindings = {
@@ -314,6 +346,8 @@ void ReSTIRPT::render() {
 					.bind(gbuffers[pong])
 					.bind(flag_buffers[WRITE_OR_CURR_IDX])
 					.bind(compact_buffers[WRITE_OR_CURR_IDX])
+					.zero(gris_replay_ray_count_buffer)
+					.zero(gris_replay_shadow_ray_count_buffer)
 					.bind_texture_array(lumen_scene->scene_textures)
 					.bind_tlas(tlas);
 				// Validate
@@ -475,6 +509,68 @@ void ReSTIRPT::render() {
 		}
 		vmaUnmapMemory(vk::context().allocator, gris_neighbor_distance_histogram_buffer->allocation);
 	}
+
+	// M4: actual replay traceRayEXT count per pixel-neighbor pair (retrace_paths.rgen only).
+	// Reuses the profile_neighbor_access gate since it's the same "is profiling on" switch.
+	if (pc_ray.profile_neighbor_access && num_spatial_samples > 0) {
+		vkDeviceWaitIdle(vk::context().device);
+		const uint32_t total_pixels = Window::width() * Window::height();
+		const uint32_t slots_per_pixel = num_spatial_samples + 1;	 // slot 0 unused, see gris_commons.glsl
+
+		void* mapped_replay = nullptr;
+		vmaMapMemory(vk::context().allocator, gris_replay_ray_count_buffer->allocation, &mapped_replay);
+		const uint32_t* replay_counts = (const uint32_t*)mapped_replay;
+
+		std::map<uint32_t, uint32_t> pair_histogram;	// ray count for one pixel-neighbor pair -> num pairs
+		std::map<uint32_t, uint32_t> thread_histogram; // summed ray count for one pixel's N pairs -> num pixels
+		uint64_t total_pairs = 0, zero_pairs = 0, total_replay_rays = 0;
+		uint64_t zero_threads = 0;
+		uint64_t gbuffer_valid_pixels = 0;	// slot 0 sanity check, see retrace_paths.rgen
+		for (uint32_t px = 0; px < total_pixels; px++) {
+			if (replay_counts[slots_per_pixel * px] != 0) gbuffer_valid_pixels++;
+			uint32_t thread_sum = 0;
+			for (uint32_t i = 0; i < num_spatial_samples; i++) {
+				uint32_t c = replay_counts[slots_per_pixel * px + i + 1];
+				pair_histogram[c]++;
+				total_pairs++;
+				if (c == 0) zero_pairs++;
+				total_replay_rays += c;
+				thread_sum += c;
+			}
+			thread_histogram[thread_sum]++;
+			if (thread_sum == 0) zero_threads++;
+		}
+		vmaUnmapMemory(vk::context().allocator, gris_replay_ray_count_buffer->allocation);
+		LUMEN_TRACE("=== M4 GBuffer sanity check: {} / {} pixels ({:.2f}%) had a valid primary gbuffer ===",
+					gbuffer_valid_pixels, total_pixels, gbuffer_valid_pixels * 100.0f / total_pixels);
+
+		auto report_histogram = [&](const char* label, const std::map<uint32_t, uint32_t>& hist, uint64_t total_items,
+									uint64_t zero_items, const std::string& csv_path) {
+			LUMEN_TRACE("=== M4 replay ray count [{}] ({} items, {} zero, {:.2f}% idle) ===", label, total_items,
+						zero_items, total_items > 0 ? zero_items * 100.0f / total_items : 0.0f);
+			uint64_t sum_active = 0, n_active = 0;
+			uint32_t max_val = 0;
+			for (const auto& [val, count] : hist) {
+				if (val > 0) {
+					sum_active += (uint64_t)val * count;
+					n_active += count;
+					max_val = std::max(max_val, val);
+				}
+				LUMEN_TRACE("  ray_count={}: {} items ({:.2f}%)", val, count,
+							total_items > 0 ? count * 100.0f / total_items : 0.0f);
+			}
+			LUMEN_TRACE("  active-only mean={:.3f} max={}", n_active > 0 ? (double)sum_active / n_active : 0.0,
+						max_val);
+			std::ofstream csv(csv_path);
+			csv << "ray_count,item_count\n";
+			for (const auto& [val, count] : hist) csv << val << "," << count << "\n";
+		};
+		report_histogram("per-pair", pair_histogram, total_pairs, zero_pairs,
+						 "m4_replay_ray_count_per_pair.csv");
+		report_histogram("per-thread-sum", thread_histogram, total_pixels, zero_threads,
+						 "m4_replay_ray_count_per_thread.csv");
+		LUMEN_TRACE("=== M4 replay ray count total across all pairs this frame: {} ===", total_replay_rays);
+	}
 }
 
 bool ReSTIRPT::update() {
@@ -573,6 +669,20 @@ bool ReSTIRPT::gui() {
 					  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 			 .memory_type = vk::BufferType::GPU,
 			 .size = Window::width() * Window::height() * sizeof(ReconnectionData) * (num_spatial_samples + 1)});
+		prm::remove(gris_replay_ray_count_buffer);
+		gris_replay_ray_count_buffer =
+			prm::get_buffer({.name = "GRIS Replay Ray Count",
+							 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+									  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+							 .memory_type = vk::BufferType::GPU_TO_CPU,
+							 .size = Window::width() * Window::height() * (num_spatial_samples + 1) * sizeof(uint32_t)});
+		prm::remove(gris_replay_shadow_ray_count_buffer);
+		gris_replay_shadow_ray_count_buffer =
+			prm::get_buffer({.name = "GRIS Replay Shadow Ray Count",
+							 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+									  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+							 .memory_type = vk::BufferType::GPU_TO_CPU,
+							 .size = Window::width() * Window::height() * (num_spatial_samples + 1) * sizeof(uint32_t)});
 	}
 	return result;
 }

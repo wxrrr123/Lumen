@@ -33,6 +33,10 @@ class ReSTIRPT final : public Integrator {
 	vk::Buffer* debug_vis_buffer;
 	vk::Buffer* gris_neighbor_access_count_buffer;
 	vk::Buffer* gris_neighbor_distance_histogram_buffer;
+	// M4 replay-ray-count profiling (retrace_paths.rgen only). Same (num_spatial_samples+1)
+	// per-pixel layout as reconnection_buffer -- slot 0 unused, slot i+1 = neighbor i.
+	vk::Buffer* gris_replay_ray_count_buffer;
+	vk::Buffer* gris_replay_shadow_ray_count_buffer;
 	// CPU-side copy of last frame's "accessed (count > 0)" mask, for frame-to-frame access
 	// pattern stability profiling (see profile_neighbor_access). Size mismatch (e.g. after a
 	// resolution change) is treated as "no previous frame" and the comparison is skipped for
