@@ -62,7 +62,7 @@ class ReSTIRPT final : public Integrator {
 	float min_vertex_distance_ratio = 0.00f;
 	float gris_separator = 1.0f;
 	uint32_t path_length = 0;
-	uint32_t num_spatial_samples = 1;
+	uint32_t num_spatial_samples = 3;
 	static constexpr float compact_ratio = 1.0f;
 	// Must match NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS in spatial_reuse.rgen
 	static constexpr uint32_t NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS = 32;
