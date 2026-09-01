@@ -42,8 +42,7 @@ void Path::render() {
 					 .shaders = {{"src/shaders/integrators/path/path.rgen"},
 								 {"src/shaders/ray.rmiss"},
 								 {"src/shaders/ray_shadow.rmiss"},
-								 {"src/shaders/ray.rchit"},
-								 {"src/shaders/ray.rahit"}},
+								 {"src/shaders/ray.rchit"}},
 					 .dims = {Window::width(), Window::height()},
 				 })
 		.push_constants(&pc_ray)

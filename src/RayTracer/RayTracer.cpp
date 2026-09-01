@@ -470,7 +470,7 @@ float RayTracer::draw_frame() {
 	if (write_exr && (integrator->frame_num % 5 == 0 || integrator->frame_num < 10) && integrator->frame_num < 500) {
 		// write_exr = false;
 		vkDeviceWaitIdle(vk::context().device);
-		std::string filename = "output/path_dep10_output/out_" + std::to_string(integrator->frame_num) + ".exr";
+		std::string filename = "output/restirpt_small_buf_output/out_" + std::to_string(integrator->frame_num) + ".exr";
 		ImageUtils::save_exr((float*)vk::map_buffer(output_img_buffer_cpu), Window::width(), Window::height(),
 							 filename.c_str());
 		vk::unmap_buffer(output_img_buffer_cpu);
