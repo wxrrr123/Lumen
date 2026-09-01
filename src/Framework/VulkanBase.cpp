@@ -531,7 +531,7 @@ static void create_sync_primitives() {
 }
 
 // Called after window resize
-static void recreate_swap_chain() {
+void recreate_swapchain() {
 	int width = 0, height = 0;
 	glfwGetFramebufferSize(Window::get()->window_handle, &width, &height);
 	while (width == 0 || height == 0) {
@@ -747,7 +747,7 @@ VkResult submit_frame(uint32_t image_idx) {
 	VkResult result = vkQueuePresentKHR(context().queues[(int)QueueType::GFX], &present_info);
 	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
 		vkDeviceWaitIdle(context().device);
-		recreate_swap_chain();
+		recreate_swapchain();
 		return result;
 	} else if (result != VK_SUCCESS) {
 		LUMEN_ERROR("Failed to present swap chain image");

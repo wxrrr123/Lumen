@@ -6,7 +6,7 @@
 #include "Framework/VkUtils.h"
 
 void Integrator::init() {
-	lumen::Camera* cam_ptr = lumen_scene->camera.get();
+	Window::clear_mouse_callbacks();
 	Window::add_mouse_click_callback(
 		[this](MouseAction button, KeyAction action, double x, double y) {
 			if (ImGui::GetIO().WantCaptureMouse) {
@@ -20,12 +20,12 @@ void Integrator::init() {
 			}
 		});
 	Window::add_mouse_move_callback(
-		[cam_ptr, this](double delta_x, double delta_y, double x, double y) {
+		[this](double delta_x, double delta_y, double x, double y) {
 			if (ImGui::GetIO().WantCaptureMouse) {
 				return;
 			}
 			if (Window::is_mouse_held(MouseAction::LEFT) && !Window::is_key_held(KeyInput::KEY_TAB)) {
-				cam_ptr->rotate(0.05f * (float)delta_y, -0.05f * (float)delta_x, 0.0f);
+				lumen_scene->camera->rotate(0.05f * (float)delta_y, -0.05f * (float)delta_x, 0.0f);
 				updated = true;
 			}
 		});

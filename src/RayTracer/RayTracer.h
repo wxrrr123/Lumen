@@ -30,6 +30,7 @@ class RayTracer {
 	void cleanup_resources();
 	void parse_args(int argc, char* argv[]);
 	float draw_frame();
+	bool resize_if_needed();
 	void render(uint32_t idx);
 	void render_debug_utils();
 	void create_integrator(int integrator_idx);

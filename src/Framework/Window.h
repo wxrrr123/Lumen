@@ -175,6 +175,7 @@ void destroy();
 void add_mouse_click_callback(MouseClickCallback callback);
 void add_mouse_move_callback(MouseMoveCallback callback);
 void add_scroll_callback(MouseScrollCallback callback);
+void clear_mouse_callbacks();
 void add_key_callback(KeyCallback callback);
 uint32_t width();
 uint32_t height();

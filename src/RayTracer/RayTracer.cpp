@@ -381,16 +381,54 @@ bool RayTracer::gui() {
 	return updated;
 }
 
+bool RayTracer::resize_if_needed() {
+	int width = 0;
+	int height = 0;
+	glfwGetWindowSize(Window::get()->window_handle, &width, &height);
+	if (width == 0 || height == 0) {
+		return true;
+	}
+	if (uint32_t(width) == Window::width() && uint32_t(height) == Window::height()) {
+		return false;
+	}
+
+	vkDeviceWaitIdle(vk::context().device);
+	vk::render_graph()->reset();
+
+	cleanup_resources();
+	integrator->destroy();
+	post_fx.destroy();
+	vk::destroy_imgui();
+
+	Window::update_window_size();
+	vk::recreate_swapchain();
+
+	const float aspect_ratio = float(Window::width()) / float(Window::height());
+	const PerspectiveCamera* old_cam = static_cast<PerspectiveCamera*>(scene.camera.get());
+	glm::vec3 old_rotation = old_cam->rotation;
+	scene.camera = std::make_unique<lumen::PerspectiveCamera>(old_cam->fov, 0.01f, 1000.0f, aspect_ratio,
+															  old_cam->direction, old_cam->position);
+	scene.camera->rotation = old_rotation;
+
+	integrator->init();
+	post_fx.init();
+	init_resources();
+	vk::init_imgui();
+	integrator->updated = true;
+	return true;
+}
+
 float RayTracer::draw_frame() {
 	if (cnt == 0) {
 		start = clock();
 	}
 
-	auto resize_func = [this]() {
-
-	};
 	auto t_begin = glfwGetTime() * 1000;
 	bool updated = false;
+	if (resize_if_needed()) {
+		auto t_end = glfwGetTime() * 1000;
+		return float(t_end - t_begin);
+	}
 	uint32_t image_idx = vk::prepare_frame();
 	if (image_idx == UINT32_MAX) {
 		auto t_end = glfwGetTime() * 1000;
@@ -423,23 +461,7 @@ float RayTracer::draw_frame() {
 	VkResult result = vk::submit_frame(image_idx);
 	vk::render_graph()->reset();
 	if (result != VK_SUCCESS) {
-		Window::update_window_size();
-		const float aspect_ratio = (float)Window::width() / Window::height();
-		const PerspectiveCamera* old_cam = (PerspectiveCamera*)scene.camera.get();
-		glm::vec3 old_rotation = old_cam->rotation;
-		scene.camera = std::unique_ptr<lumen::PerspectiveCamera>(new lumen::PerspectiveCamera(
-			old_cam->fov, 0.01f, 1000.0f, aspect_ratio, old_cam->direction, old_cam->position));
-		scene.camera->rotation = old_rotation;
-		cleanup_resources();
-		integrator->destroy();
-		post_fx.destroy();
-		vk::destroy_imgui();
-
-		integrator->init();
-		post_fx.init();
-		init_resources();
-		vk::init_imgui();
-		integrator->updated = true;
+		resize_if_needed();
 	}
 
 	auto now = clock();

@@ -94,6 +94,12 @@ void init(int width, int height, bool fullscreen) {
 	_window.window_handle =
 		glfwCreateWindow(width, height, "Lumen", fullscreen ? glfwGetPrimaryMonitor() : nullptr, nullptr);
 	LUMEN_ASSERT(_window.window_handle, "Failed to create a window!");
+	if (!fullscreen) {
+		// Some window managers auto-maximize newly created windows, overriding the
+		// requested size. Force it back to the requested size right after creation.
+		glfwRestoreWindow(_window.window_handle);
+		glfwSetWindowSize(_window.window_handle, width, height);
+	}
 	glfwSetWindowUserPointer(_window.window_handle, &_window);
 	glfwSetKeyCallback(_window.window_handle, key_callback);
 	glfwSetWindowSizeCallback(_window.window_handle, window_size_callback);
@@ -120,6 +126,12 @@ void add_mouse_click_callback(MouseClickCallback callback) { _window.mouse_click
 void add_mouse_move_callback(MouseMoveCallback callback) { _window.mouse_move_callbacks.push_back(callback); }
 
 void add_scroll_callback(MouseScrollCallback callback) { _window.mouse_scroll_callbacks.push_back(callback); }
+
+void clear_mouse_callbacks() {
+	_window.mouse_click_callbacks.clear();
+	_window.mouse_move_callbacks.clear();
+	_window.mouse_scroll_callbacks.clear();
+}
 
 void add_key_callback(KeyCallback callback) { _window.key_callbacks.push_back(callback); }
 

@@ -10,6 +10,7 @@ void init(bool validation_layers);
 void destroy_imgui();
 void add_device_extension(const char* name);
 std::vector<Texture*>& swapchain_images();
+void recreate_swapchain();
 uint32_t prepare_frame();
 VkResult submit_frame(uint32_t image_idx);
 lumen::RenderGraph* render_graph();
