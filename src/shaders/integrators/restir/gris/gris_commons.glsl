@@ -497,6 +497,18 @@ bool advance_paths(in HitData dst_gbuffer, in GrisData data, vec3 dst_wi, float 
 			}
 #endif
 			const float light_pick_pdf = 1. / pc.light_triangle_count;
+			// To reproduce the M-branch-union sweep, uncomment any subset of these three defines
+			// (results in divergence-study/results-2026-09-01-lumen-baseline.md):
+			// #define DROP_NEE
+			// #define DROP_NEE_AFTER_RC
+			// #define DROP_EMISSIVE_AFTER_RC
+			// M-branch-union measurement build only (see divergence-study handoff): #ifdef DROP_*
+			// macros progressively remove rc_type branches at COMPILE TIME (unlike
+			// num_spatial_samples, a runtime push-constant that can't do this) to measure whether
+			// ptxas's register allocation is a union across branches or overlaps via live-range
+			// analysis. Output is expected to be WRONG whenever any DROP_* is defined -- this is a
+			// register-count-only build, never use it for a functional/image-correctness run.
+#ifndef DROP_NEE
 			if (rc_type == RECONNECTION_TYPE_NEE) {
 				// In this case directly re-use the NEE result
 				ASSERT(prefix_depth != 0);	// Can't process direct lighting
@@ -519,7 +531,9 @@ bool advance_paths(in HitData dst_gbuffer, in GrisData data, vec3 dst_wi, float 
 				reservoir_contribution *= light.L * mis_weight / (light_pick_pdf * pdf_light_w);
 				LOG_CLICKED3("NEE: %d - %d = %v3f\n", prefix_depth, (data.path_flags) >> 16, reservoir_contribution);
 				jacobian = 1;
-			} else {
+			} else
+#endif
+			{
 				const bool connection_to_nee_vertex = rc_postfix_length == 2;
 				float g = abs(dot(dst_postfix_wi, rc_gbuffer.n_s)) / wi_len_sqr;
 
@@ -535,19 +549,33 @@ bool advance_paths(in HitData dst_gbuffer, in GrisData data, vec3 dst_wi, float 
 											  rc_pdf_post, unused_rev_pdf, false);
 
 				float mis_weight = 1.0;
+#ifndef DROP_EMISSIVE_AFTER_RC
 				if (rc_type == RECONNECTION_TYPE_EMISSIVE_AFTER_RC) {
 					ASSERT(rc_postfix_length == 1);
 					mis_weight = 1.0 / (1 + uintBitsToFloat(data.rc_seed) / dst_postfix_pdf);
-				} else if (rc_type == RECONNECTION_TYPE_NEE_AFTER_RC) {
+				}
+#endif
+#if !defined(DROP_EMISSIVE_AFTER_RC) && !defined(DROP_NEE_AFTER_RC)
+				else
+#endif
+#ifndef DROP_NEE_AFTER_RC
+				if (rc_type == RECONNECTION_TYPE_NEE_AFTER_RC) {
 					// TODO: Handle directional light
 					mis_weight = 1.0 / (1 + rc_pdf_post / uintBitsToFloat(data.rc_seed));
 				}
+#endif
 
+#ifndef DROP_NEE_AFTER_RC
 				if (rc_type == RECONNECTION_TYPE_NEE_AFTER_RC) {
 					reservoir_contribution *= rc_postfix_f * abs(dot(rc_gbuffer.n_s, rc_wi_post)) /
 											  (light_pick_pdf * uintBitsToFloat(data.rc_seed));
 
-				} else if (rc_type != RECONNECTION_TYPE_EMISSIVE_AFTER_RC) {
+				} else
+#endif
+#ifndef DROP_EMISSIVE_AFTER_RC
+				if (rc_type != RECONNECTION_TYPE_EMISSIVE_AFTER_RC)
+#endif
+				{
 					jacobian_num *= rc_pdf_post;
 					reservoir_contribution *= rc_postfix_f * abs(dot(rc_gbuffer.n_s, rc_wi_post)) / rc_pdf_post;
 				}
