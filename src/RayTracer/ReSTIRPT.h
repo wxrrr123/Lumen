@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 #include "Framework/Texture.h"
 #include "Integrator.h"
 #include "shaders/integrators/restir/gris/gris_commons.h"
@@ -30,6 +31,13 @@ class ReSTIRPT final : public Integrator {
 	vk::Buffer* reconnection_buffer;
 	vk::Buffer* transformations_buffer;
 	vk::Buffer* debug_vis_buffer;
+	vk::Buffer* gris_neighbor_access_count_buffer;
+	vk::Buffer* gris_neighbor_distance_histogram_buffer;
+	// CPU-side copy of last frame's "accessed (count > 0)" mask, for frame-to-frame access
+	// pattern stability profiling (see profile_neighbor_access). Size mismatch (e.g. after a
+	// resolution change) is treated as "no previous frame" and the comparison is skipped for
+	// that frame.
+	std::vector<uint8_t> prev_frame_accessed_mask;
 	vk::Texture* canonical_contributions_texture;
 	vk::Texture* direct_lighting_texture;
 
@@ -48,12 +56,16 @@ class ReSTIRPT final : public Integrator {
 	bool enable_defensive_formulation = true;
 	bool enable_occlusion = true;
 	bool enable_temporal_jitter = true;
+	bool profile_neighbor_access = true;
+	bool stable_neighbor_offset = true;
 	float spatial_reuse_radius = 32.0f;
 	float min_vertex_distance_ratio = 0.00f;
 	float gris_separator = 1.0f;
 	uint32_t path_length = 0;
 	uint32_t num_spatial_samples = 1;
-	static constexpr float compact_ratio = 0.5f;
+	static constexpr float compact_ratio = 1.0f;
+	// Must match NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS in spatial_reuse.rgen
+	static constexpr uint32_t NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS = 32;
 	StreamingMethod streaming_method = StreamingMethod::INDIVIDUAL_CONTRIBUTIONS;
 	MISMethod mis_method = MISMethod::PAIRWISE;
 	ReSTIRPTConfig* config;

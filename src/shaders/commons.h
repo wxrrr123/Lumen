@@ -296,6 +296,8 @@ struct Material {
 	uint64_t prefix_contributions_addr;
 	uint64_t transformations_addr;
 	uint64_t debug_vis_addr;
+	uint64_t gris_neighbor_access_count_addr;
+	uint64_t gris_neighbor_distance_histogram_addr;
 
 	// VCM Reservoir
 	uint64_t vcm_reservoir_addr;

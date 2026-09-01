@@ -42,6 +42,8 @@ struct PCReSTIRPT {
 	uint enable_occlusion;
 	uint enable_temporal_jitter;
 	uint compact_slot_count;
+	uint profile_neighbor_access;
+	uint stable_neighbor_offset;
 };
 
 struct GBuffer {
