@@ -206,8 +206,7 @@ void ReSTIRPT::render() {
 					 .shaders = {{"src/shaders/integrators/restir/gris/gris.rgen"},
 								 {"src/shaders/integrators/restir/gris/ray.rmiss"},
 								 {"src/shaders/ray_shadow.rmiss"},
-								 {"src/shaders/integrators/restir/gris/ray.rchit"},
-								 {"src/shaders/ray.rahit"}},
+								 {"src/shaders/integrators/restir/gris/ray.rchit"}},
 					 .macros = {{"STREAMING_MODE", int(streaming_method)},
 								vk::ShaderMacro("ENABLE_ATMOSPHERE", enable_atmosphere)},
 					 .dims = {Window::width(), Window::height()},
@@ -235,8 +234,7 @@ void ReSTIRPT::render() {
 						 .shaders = {{"src/shaders/integrators/restir/gris/temporal_reuse.rgen"},
 									 {"src/shaders/integrators/restir/gris/ray.rmiss"},
 									 {"src/shaders/ray_shadow.rmiss"},
-									 {"src/shaders/integrators/restir/gris/ray.rchit"},
-									 {"src/shaders/ray.rahit"}},
+									 {"src/shaders/integrators/restir/gris/ray.rchit"}},
 						 .dims = {Window::width(), Window::height()},
 					 })
 			.push_constants(&pc_ray)
@@ -262,8 +260,7 @@ void ReSTIRPT::render() {
 								 .shaders = {{"src/shaders/integrators/restir/gris/spatial_reuse_talbot.rgen"},
 											 {"src/shaders/integrators/restir/gris/ray.rmiss"},
 											 {"src/shaders/ray_shadow.rmiss"},
-											 {"src/shaders/integrators/restir/gris/ray.rchit"},
-											 {"src/shaders/ray.rahit"}},
+											 {"src/shaders/integrators/restir/gris/ray.rchit"}},
 								 .dims = {Window::width(), Window::height()},
 							 })
 					.push_constants(&pc_ray)
@@ -283,8 +280,7 @@ void ReSTIRPT::render() {
 								 .shaders = {{"src/shaders/integrators/restir/gris/retrace_paths.rgen"},
 											 {"src/shaders/integrators/restir/gris/ray.rmiss"},
 											 {"src/shaders/ray_shadow.rmiss"},
-											 {"src/shaders/integrators/restir/gris/ray.rchit"},
-											 {"src/shaders/ray.rahit"}},
+											 {"src/shaders/integrators/restir/gris/ray.rchit"}},
 								 .dims = {Window::width(), Window::height()},
 							 })
 					.push_constants(&pc_ray)
@@ -303,8 +299,7 @@ void ReSTIRPT::render() {
 								 .shaders = {{"src/shaders/integrators/restir/gris/validate_samples.rgen"},
 											 {"src/shaders/integrators/restir/gris/ray.rmiss"},
 											 {"src/shaders/ray_shadow.rmiss"},
-											 {"src/shaders/integrators/restir/gris/ray.rchit"},
-											 {"src/shaders/ray.rahit"}},
+											 {"src/shaders/integrators/restir/gris/ray.rchit"}},
 								 .dims = {Window::width(), Window::height()},
 							 })
 					.push_constants(&pc_ray)
@@ -325,8 +320,7 @@ void ReSTIRPT::render() {
 							.shaders = {{"src/shaders/integrators/restir/gris/spatial_reuse.rgen"},
 										{"src/shaders/integrators/restir/gris/ray.rmiss"},
 										{"src/shaders/ray_shadow.rmiss"},
-										{"src/shaders/integrators/restir/gris/ray.rchit"},
-										{"src/shaders/ray.rahit"}},
+										{"src/shaders/integrators/restir/gris/ray.rchit"}},
 							.macros = {vk::ShaderMacro("ENABLE_DEFENSIVE_PAIRWISE_MIS", enable_defensive_formulation)},
 							.dims = {Window::width(), Window::height()},
 						})
