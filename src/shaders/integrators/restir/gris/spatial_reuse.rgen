@@ -28,8 +28,16 @@ uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer DebugVisBuffer { uint d[]; };
 DebugVisBuffer debug_vis = DebugVisBuffer(scene_desc.debug_vis_addr);
 
+// Compile-time gated (not just pc.profile_neighbor_access, a runtime flag): the buffer_reference
+// declaration + conditional store below are otherwise always compiled in regardless of the
+// runtime flag's value, costing register pressure (measured +13 regs / +16% on this pass) for a
+// feature that's off by default. Uncomment to reproduce the M4/neighbor-access-locality
+// measurements; leave commented for clean timing runs (e.g. the SER cost-key reorder experiment).
+// #define ENABLE_NEIGHBOR_ACCESS_PROFILING
+#ifdef ENABLE_NEIGHBOR_ACCESS_PROFILING
 layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer NeighborAccessCountBuffer { uint d[]; };
 NeighborAccessCountBuffer neighbor_access_count = NeighborAccessCountBuffer(scene_desc.gris_neighbor_access_count_addr);
+#endif
 
 
 float calc_spatial_importance(Reservoir header) {
@@ -147,11 +155,13 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 		}
 	}
 
+#ifdef ENABLE_NEIGHBOR_ACCESS_PROFILING
 	if (pc.profile_neighbor_access == 1) {
 		// One thread owns pixel_idx here (this raygen is dispatched one invocation per pixel),
 		// so a plain store is safe -- no cross-thread write to the same index, no atomic needed.
 		neighbor_access_count.d[pixel_idx] = num_accepted_positions;
 	}
+#endif
 
 #ifndef ENABLE_DEFENSIVE_PAIRWISE_MIS
 	if (num_valid_samples == 0) {

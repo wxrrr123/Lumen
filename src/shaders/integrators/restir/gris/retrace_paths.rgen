@@ -14,7 +14,11 @@
 // M4: per-pair replay ray count profiling (real traceRayEXT calls inside advance_paths(),
 // this pass only -- see gris_commons.glsl). Not defined by any other .rgen, so this is the
 // only translation unit where the counter code in gris_commons.glsl compiles at all.
-#define PROFILE_REPLAY_RAY_COUNT
+// Off by default -- costs measured +3 regs / +1.8% on this pass when on (see
+// divergence-study/results-2026-09-01-lumen-baseline.md M4). Uncomment for M4-style replay-ray-
+// count measurements; leave commented for clean timing runs (e.g. the SER cost-key reorder
+// experiment, which needs the un-instrumented baseline register count).
+// #define PROFILE_REPLAY_RAY_COUNT
 #include "gris_commons.glsl"
 layout(binding = 4, scalar) buffer PathReconnections { ReconnectionData reconnection_data[]; };
 layout(binding = 5, scalar) readonly buffer InResHeaders { Reservoir in_headers[]; };
@@ -29,10 +33,12 @@ DebugVisBuffer debug_vis = DebugVisBuffer(scene_desc.debug_vis_addr);
 // Same indexing scheme as PathReconnections: (num_spatial_samples+1) slots per pixel, slot 0
 // unused by this loop, slot i+1 holds neighbor i's counters. Per-pair AND per-thread-sum are
 // both derivable from this on the host side.
+#ifdef PROFILE_REPLAY_RAY_COUNT
 layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer ReplayRayCountBuffer { uint d[]; };
 ReplayRayCountBuffer replay_ray_count = ReplayRayCountBuffer(scene_desc.gris_replay_ray_count_addr);
 layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer ReplayShadowRayCountBuffer { uint d[]; };
 ReplayShadowRayCountBuffer replay_shadow_ray_count = ReplayShadowRayCountBuffer(scene_desc.gris_replay_shadow_ray_count_addr);
+#endif
 
 void main() {
 	GBuffer gbuffer = curr_gbuffers[pixel_idx];
@@ -45,7 +51,9 @@ void main() {
 	// Reuse this pixel's otherwise-unused slot 0 (real pairs are slots 1..N, see indexing
 	// below) as a cheap "this pixel's primary gbuffer was valid" flag for a GBuffer sanity
 	// check on a new scene -- no new buffer needed.
+#ifdef PROFILE_REPLAY_RAY_COUNT
 	replay_ray_count.d[(num_spatial_samples + 1) * pixel_idx] = 1;
+#endif
 	Reservoir canonical_header = in_headers[pixel_idx];
 	uint hot_terminates = 0;
 	uint total_neighbors = 0;
@@ -100,14 +108,18 @@ void main() {
 		GrisData neighbor_data = compact_data[neighbor_slot];
 
 		vec3 primary_direction = get_primary_direction(uvec2(gl_LaunchIDEXT.xy));
+#ifdef PROFILE_REPLAY_RAY_COUNT
 		g_replay_ray_count = 0;
 		g_replay_shadow_ray_count = 0;
+#endif
 		retrace_paths(canonical_gbuffer, neighbor_data, primary_direction,
                       neighbor_data.rc_partial_jacobian, data.jacobian, data.reservoir_contribution,
                       data.new_jacobian);
 		reconnection_data[(num_spatial_samples + 1) * pixel_idx + i + 1] = data;
+#ifdef PROFILE_REPLAY_RAY_COUNT
 		replay_ray_count.d[(num_spatial_samples + 1) * pixel_idx + i + 1] = g_replay_ray_count;
 		replay_shadow_ray_count.d[(num_spatial_samples + 1) * pixel_idx + i + 1] = g_replay_shadow_ray_count;
+#endif
 	}
 
 	if (pc.pixel_debug == 1) {
