@@ -7,6 +7,14 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
+// SER cost-key reorder experiment (handoff 2026-09-02). ENABLE_REORDER_CALL is its own switch,
+// independent of ENABLE_COST_REORDER, specifically so variant D (compute the key, never call
+// reorderThreadNV) never references this extension at all -- its compiled SPIR-V is guaranteed
+// clean on hardware without VK_NV_ray_tracing_invocation_reorder (e.g. Ampere/3070), which is the
+// only variant that hardware can actually run a pipeline for.
+#ifdef ENABLE_REORDER_CALL
+#extension GL_NV_shader_invocation_reorder : require
+#endif
 
 // #define SCENE_TEX_IDX 7
 #define SCENE_TEX_IDX 9
@@ -29,6 +37,11 @@ uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
 
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer DebugVisBuffer { uint d[]; };
 DebugVisBuffer debug_vis = DebugVisBuffer(scene_desc.debug_vis_addr);
+
+// SER cost-key reorder experiment. Measured per-thread max (summed over a pixel's N neighbors,
+// see divergence-study/results-2026-09-01-lumen-baseline.md M4) is 16 on classroom -- 5 bits
+// (0-31) covers it with headroom. Start here, sweep later if needed.
+#define COST_KEY_BITS 5
 
 // Same indexing scheme as PathReconnections: (num_spatial_samples+1) slots per pixel, slot 0
 // unused by this loop, slot i+1 holds neighbor i's counters. Per-pair AND per-thread-sum are
@@ -55,6 +68,82 @@ void main() {
 	replay_ray_count.d[(num_spatial_samples + 1) * pixel_idx] = 1;
 #endif
 	Reservoir canonical_header = in_headers[pixel_idx];
+
+#ifdef ENABLE_COST_REORDER
+	// First pass: reproduce the real loop's neighbor selection below EXACTLY (same skip
+	// conditions, same order, same get_neighbor_offset() call sequence), reading only
+	// path_flags -- never calling retrace_paths() -- to derive a cost key before the real work
+	// starts. Uses a LOCAL COPY of seed2 (cost_seed), not seed2 itself, so this cannot perturb
+	// the real loop's RNG sequence below by construction -- no reset-after-the-fact needed, no
+	// place to forget one. This is deliberately the same five skip conditions the real loop
+	// applies (screen bounds, reservoir invalid, gbuffer invalid, normal/distance dissimilarity,
+	// compact slot invalid), not just the two the handoff sketch named -- any condition the real
+	// loop uses to skip a neighbor for free must also be skipped for free here, or the key is
+	// biased high for exactly the pixels doing the least real work.
+	uint cost_key = 0;
+	{
+		uvec4 cost_seed = seed2;
+		for (uint i = 0; i < num_spatial_samples; i++) {
+			ivec2 rand_offset = get_neighbor_offset(cost_seed);
+			const ivec2 coords = ivec2(gl_LaunchIDEXT.xy) + rand_offset;
+			if (any(lessThan(coords, ivec2(0))) || any(greaterThanEqual(coords, gl_LaunchSizeEXT.xy))) {
+				continue;
+			}
+			const uint neighbor_pixel_idx = coords.x * pc.size_y + coords.y;
+
+			Reservoir neighbor_header = in_headers[neighbor_pixel_idx];
+			if (neighbor_header.W == 0.0 || neighbor_header.M == 0) {
+				continue;
+			}
+
+			GBuffer neighbor_gbuffer = curr_gbuffers[neighbor_pixel_idx];
+			if (!gbuffer_data_valid(neighbor_gbuffer)) {
+				continue;
+			}
+
+			HitData unpacked_neighbor_gbuffer =
+				get_hitdata(neighbor_gbuffer.barycentrics, neighbor_gbuffer.primitive_instance_id.y,
+							neighbor_gbuffer.primitive_instance_id.x);
+			float normal_sim = dot(canonical_gbuffer.n_s, unpacked_neighbor_gbuffer.n_s);
+			vec3 dist_vec = canonical_gbuffer.pos - unpacked_neighbor_gbuffer.pos;
+			float dist_sq = dot(dist_vec, dist_vec);
+			const float normal_threshold = 0.99;
+			const float dist_threshold_sq = pow(pc.scene_extent * 0.05, 2.0);
+			if (normal_sim < normal_threshold || dist_sq > dist_threshold_sq) {
+				continue;
+			}
+
+			uint neighbor_slot = in_flags[neighbor_pixel_idx];
+			if (!compact_slot_valid(neighbor_slot)) {
+				continue;
+			}
+			GrisData neighbor_data = compact_data[neighbor_slot];
+
+			uint rc_type, rc_prefix_length, rc_postfix_length;
+			bool rc_side, is_directional_light;
+			unpack_path_flags(neighbor_data.path_flags, rc_type, rc_prefix_length, rc_postfix_length,
+							  rc_side, is_directional_light);
+			// Bounded by the same exit condition advance_paths() itself uses
+			// (prefix_depth + rc_postfix_length + 1 > pc.max_depth), so this can't overestimate
+			// a path that would terminate early regardless of rc_prefix_length.
+			int remaining_budget = int(pc.max_depth) - int(rc_postfix_length) - 1;
+			cost_key += min(rc_prefix_length, uint(max(0, remaining_budget)));
+		}
+	}
+#ifdef ENABLE_REORDER_CALL
+	// C: cost-key reorder (the main result).
+	reorderThreadNV(cost_key, COST_KEY_BITS);
+#endif
+#elif defined(ENABLE_REORDER_CALL)
+	// B: reorder call with a constant key, same bit width as C (COST_KEY_BITS) -- isolates the
+	// fixed cost of invoking hardware reordering itself, without the cost-key's information
+	// content. Deliberately NOT bits=0: a 0-bit key risks being elided entirely by the driver
+	// (no information -> possibly no-op the whole call), which would make B degenerate into A and
+	// measure nothing. B and C must differ ONLY in the key's content, not its bit width, for the
+	// B-vs-C comparison to isolate what the real cost_key is worth.
+	reorderThreadNV(0u, COST_KEY_BITS);
+#endif
+
 	uint hot_terminates = 0;
 	uint total_neighbors = 0;
 	for (uint i = 0; i < num_spatial_samples; i++) {

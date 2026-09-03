@@ -21,6 +21,8 @@ struct SwapChainSupportDetails {
 const std::vector<const char*> _validation_layers_lst = {"VK_LAYER_KHRONOS_validation"};
 
 std::vector<const char*> _device_extensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+std::vector<const char*> _optional_device_extensions;
+std::unordered_set<std::string> _enabled_optional_device_extensions;
 
 size_t current_frame = 0;
 // Sync primitives
@@ -327,6 +329,18 @@ static void create_logical_device() {
 	atomic_fts.shaderSharedFloat32AtomicAdd = true;
 	atomic_fts.shaderSharedFloat32Atomics = true;
 	atomic_fts.pNext = nullptr;
+	// SER cost-key reorder experiment: real per-pipeline register counts via
+	// VK_KHR_pipeline_executable_properties (vkGetPipelineExecutableStatisticsKHR), not the
+	// Vulkan-Sim ptxas regs= number -- different compiler, not directly comparable across
+	// backends (see divergence-study/results-2026-09-02-ser-reorder.md). Requested as optional
+	// (add_optional_device_extension) and only enabled here if the driver actually reports it.
+	VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pipeline_exec_fts{
+		VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
+	if (is_device_extension_enabled(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)) {
+		pipeline_exec_fts.pipelineExecutableInfo = true;
+		pipeline_exec_fts.pNext = nullptr;
+		atomic_fts.pNext = &pipeline_exec_fts;
+	}
 	accel_fts.accelerationStructure = true;
 	accel_fts.pNext = &atomic_fts;
 	rt_fts.rayTracingPipeline = true;
@@ -616,11 +630,14 @@ static VkQueryPool create_query_pool(VkQueryType query_type, uint32_t count) {
 	return query_pool;
 }
 
+static void resolve_optional_device_extensions();
+
 void init(bool validation_layers) {
 	_enable_validation_layers = validation_layers;
 	create_instance();
 	create_surface();
 	pick_physical_device();
+	resolve_optional_device_extensions();
 	create_logical_device();
 	create_allocator();
 	create_swapchain();
@@ -691,6 +708,70 @@ void destroy_imgui() {
 }
 
 void add_device_extension(const char* name) { _device_extensions.push_back(name); }
+void add_optional_device_extension(const char* name) { _optional_device_extensions.push_back(name); }
+bool is_device_extension_enabled(const char* name) {
+	return _enabled_optional_device_extensions.find(name) != _enabled_optional_device_extensions.end();
+}
+
+// Called between pick_physical_device() and create_logical_device(): for each requested-but-
+// optional extension, check it against what context().physical_device actually reports and only
+// append the ones that are really there to _device_extensions (which create_logical_device()
+// enables). Never fails/aborts on a missing one -- that's the whole point of "optional".
+static void resolve_optional_device_extensions() {
+	if (_optional_device_extensions.empty()) return;
+
+	uint32_t extension_cnt = 0;
+	vkEnumerateDeviceExtensionProperties(context().physical_device, nullptr, &extension_cnt, nullptr);
+	std::vector<VkExtensionProperties> available_extensions(extension_cnt);
+	vkEnumerateDeviceExtensionProperties(context().physical_device, nullptr, &extension_cnt,
+										 available_extensions.data());
+	std::unordered_set<std::string> available_names;
+	for (const auto& ext : available_extensions) {
+		available_names.insert(ext.extensionName);
+	}
+
+	for (const char* name : _optional_device_extensions) {
+		bool supported = available_names.find(name) != available_names.end();
+
+		// The extension NAME being listed is not sufficient for
+		// VK_NV_ray_tracing_invocation_reorder specifically: NVIDIA's driver lists it across a
+		// wider product range than actually implements real reordering, so the string-only check
+		// alone reports "supported" even on Ampere (3070, confirmed no hardware reorder unit).
+		// Ask for the real signal instead: rayTracingInvocationReorderReorderingHint (the field
+		// the handoff named) via VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV. NONE
+		// means the driver will accept the calls but silently no-op them -- not what "supported"
+		// should mean for this experiment, so treat that the same as "extension absent".
+		if (supported && std::string(name) == VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME) {
+			VkPhysicalDeviceRayTracingInvocationReorderPropertiesNV reorder_props{};
+			reorder_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_NV;
+			VkPhysicalDeviceProperties2 props2{};
+			props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+			props2.pNext = &reorder_props;
+			vkGetPhysicalDeviceProperties2(context().physical_device, &props2);
+
+			VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorder_feat{};
+			reorder_feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
+			VkPhysicalDeviceFeatures2 feat2{};
+			feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+			feat2.pNext = &reorder_feat;
+			vkGetPhysicalDeviceFeatures2(context().physical_device, &feat2);
+
+			bool hint_is_real_reorder =
+				reorder_props.rayTracingInvocationReorderReorderingHint == VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_NV;
+			LUMEN_TRACE(
+				"  reorder feature bool: {}, reordering hint: {} ({})",
+				(bool)reorder_feat.rayTracingInvocationReorder, (int)reorder_props.rayTracingInvocationReorderReorderingHint,
+				hint_is_real_reorder ? "REORDER" : "NONE");
+			supported = supported && reorder_feat.rayTracingInvocationReorder && hint_is_real_reorder;
+		}
+
+		LUMEN_TRACE("Optional device extension {}: {}", name, supported ? "supported, enabling" : "not supported");
+		if (supported) {
+			_device_extensions.push_back(name);
+			_enabled_optional_device_extensions.insert(name);
+		}
+	}
+}
 
 std::vector<Texture*>& swapchain_images() { return _swapchain_images; }
 

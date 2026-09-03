@@ -195,6 +195,21 @@ void ReSTIRPT::init() {
 	if (getenv("LUMEN_MIN_VERTEX_DISTANCE_RATIO")) {
 		min_vertex_distance_ratio = (float)atof(getenv("LUMEN_MIN_VERTEX_DISTANCE_RATIO"));
 	}
+
+	// SER cost-key reorder experiment variant. A (default): neither flag. D: cost-key computed,
+	// reorderThreadNV() never called -- the only variant guaranteed to produce a valid pipeline
+	// on hardware without VK_NV_ray_tracing_invocation_reorder, and the only one this GPU can
+	// validate correctness for. B: reorderThreadNV() called with no key. C: both (main result).
+	const char* ser_variant = getenv("LUMEN_SER_VARIANT");
+	if (ser_variant && ser_variant[0] == 'D') {
+		ser_enable_cost_reorder = true;
+	} else if (ser_variant && ser_variant[0] == 'B') {
+		ser_enable_reorder_call = true;
+	} else if (ser_variant && ser_variant[0] == 'C') {
+		ser_enable_cost_reorder = true;
+		ser_enable_reorder_call = true;
+	}
+	LUMEN_TRACE("[SER] variant: {}", ser_variant ? ser_variant : "A (default)");
 }
 
 void ReSTIRPT::render() {
@@ -337,6 +352,8 @@ void ReSTIRPT::render() {
 											 {"src/shaders/integrators/restir/gris/ray.rmiss"},
 											 {"src/shaders/ray_shadow.rmiss"},
 											 {"src/shaders/integrators/restir/gris/ray.rchit"}},
+								 .macros = {vk::ShaderMacro("ENABLE_COST_REORDER", ser_enable_cost_reorder),
+										   vk::ShaderMacro("ENABLE_REORDER_CALL", ser_enable_reorder_call)},
 								 .dims = {Window::width(), Window::height()},
 							 })
 					.push_constants(&pc_ray)

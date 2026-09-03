@@ -159,7 +159,16 @@ vec3 do_spatial_reuse(GBuffer gbuffer, FullReservoir reservoir) {
 	if (pc.profile_neighbor_access == 1) {
 		// One thread owns pixel_idx here (this raygen is dispatched one invocation per pixel),
 		// so a plain store is safe -- no cross-thread write to the same index, no atomic needed.
+#ifdef NEIGHBOR_ACCESS_PROFILING_CONST_STORE
+		// Diagnostic only (not a real profiling mode): stores a compile-time constant instead of
+		// num_accepted_positions, to isolate the buffer_reference ADDRESS computation's register
+		// cost from the STORE DATA's -- see the "+13 regs" breakdown in
+		// divergence-study/results-2026-09-02-ser-reorder.md. Never enable alongside real use of
+		// ENABLE_NEIGHBOR_ACCESS_PROFILING (the resulting counts would be meaningless).
+		neighbor_access_count.d[pixel_idx] = 0u;
+#else
 		neighbor_access_count.d[pixel_idx] = num_accepted_positions;
+#endif
 	}
 #endif
 

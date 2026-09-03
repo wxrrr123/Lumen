@@ -1,6 +1,7 @@
 #include "../LumenPCH.h"
 #include "Pipeline.h"
 #include "VkUtils.h"
+#include "VulkanBase.h"
 
 namespace vk {
 
@@ -180,6 +181,57 @@ void Pipeline::create_gfx_pipeline(const GraphicsPassSettings& settings, const s
 	}
 }
 
+// SER cost-key reorder experiment: real per-pipeline register counts via
+// VK_KHR_pipeline_executable_properties, requested for compile-time reproducible A/B/C/D
+// comparisons -- Vulkan-Sim's ptxas regs= is a different compiler and not comparable to a real
+// driver's number (see divergence-study/results-2026-09-02-ser-reorder.md). Off unless both the
+// extension is enabled (driver support -- checked, not assumed) and the env var is set (so this
+// never runs, or costs anything, on a normal render).
+static void log_pipeline_executable_statistics(VkPipeline pipeline, const std::string& pipeline_name) {
+	if (!vk::is_device_extension_enabled(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)) return;
+	if (!getenv("LUMEN_LOG_PIPELINE_STATS")) return;
+
+	VkPipelineInfoKHR pipeline_info{VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
+	pipeline_info.pipeline = pipeline;
+
+	uint32_t exec_count = 0;
+	vkGetPipelineExecutablePropertiesKHR(vk::context().device, &pipeline_info, &exec_count, nullptr);
+	LUMEN_TRACE("[SER-REGS-DEBUG] pipeline='{}' exec_count={}", pipeline_name, exec_count);
+	std::vector<VkPipelineExecutablePropertiesKHR> exec_props(
+		exec_count, VkPipelineExecutablePropertiesKHR{VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR});
+	vkGetPipelineExecutablePropertiesKHR(vk::context().device, &pipeline_info, &exec_count, exec_props.data());
+
+	for (uint32_t i = 0; i < exec_count; i++) {
+		VkPipelineExecutableInfoKHR exec_info{VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
+		exec_info.pipeline = pipeline;
+		exec_info.executableIndex = i;
+
+		uint32_t stat_count = 0;
+		vkGetPipelineExecutableStatisticsKHR(vk::context().device, &exec_info, &stat_count, nullptr);
+		std::vector<VkPipelineExecutableStatisticKHR> stats(
+			stat_count, VkPipelineExecutableStatisticKHR{VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
+		vkGetPipelineExecutableStatisticsKHR(vk::context().device, &exec_info, &stat_count, stats.data());
+		LUMEN_TRACE("[SER-REGS-DEBUG] pipeline='{}' executable[{}]='{}' stat_count={}", pipeline_name, i,
+					exec_props[i].name, stat_count);
+
+		for (auto& stat : stats) {
+			LUMEN_TRACE("[SER-REGS-DEBUG]   stat name='{}'", stat.name);
+			// NVIDIA reports this as "Register Count"; match loosely in case of driver differences.
+			if (std::string(stat.name).find("Register") == std::string::npos) continue;
+			long long value = 0;
+			switch (stat.format) {
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: value = stat.value.i64; break;
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: value = (long long)stat.value.u64; break;
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR: value = (long long)stat.value.f64; break;
+				case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: value = stat.value.b32; break;
+				default: break;
+			}
+			LUMEN_TRACE("[SER-REGS] pipeline='{}' executable[{}]='{}' stat='{}': {}", pipeline_name, i,
+						exec_props[i].name, stat.name, value);
+		}
+	}
+}
+
 void Pipeline::create_rt_pipeline(const RTPassSettings& settings, const std::vector<uint32_t>& descriptor_counts) {
 	type = PipelineType::RT;
 	binding_mask = get_bindings_for_shader_set(settings.shaders, descriptor_types);
@@ -274,7 +326,9 @@ void Pipeline::create_rt_pipeline(const RTPassSettings& settings, const std::vec
 	pipeline_CI.pGroups = groups.data();
 	pipeline_CI.maxPipelineRayRecursionDepth = settings.recursion_depth;
 	pipeline_CI.layout = pipeline_layout;
-	pipeline_CI.flags = 0;
+	pipeline_CI.flags = vk::is_device_extension_enabled(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)
+							 ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR
+							 : 0;
 	vk::check(vkCreateRayTracingPipelinesKHR(vk::context().device, {}, {}, 1, &pipeline_CI, nullptr, &handle));
 	sbt_wrapper.setup(vk::context().queue_indices.gfx_family.value(), vk::context().rt_props);
 	sbt_wrapper.create(handle, pipeline_CI);
@@ -282,6 +336,7 @@ void Pipeline::create_rt_pipeline(const RTPassSettings& settings, const std::vec
 		vk::DebugMarker::set_resource_name(vk::context().device, (uint64_t)handle, name.c_str(),
 										   VK_OBJECT_TYPE_PIPELINE);
 	}
+	log_pipeline_executable_statistics(handle, name);
 	for (auto& stage : stages) {
 		vkDestroyShaderModule(vk::context().device, stage.module, nullptr);
 	}
@@ -323,8 +378,14 @@ void Pipeline::create_compute_pipeline(const ComputePassSettings& settings,
 	VkComputePipelineCreateInfo pipeline_CI = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
 	pipeline_CI.stage = shader_stage_ci;
 	pipeline_CI.flags |= VK_PIPELINE_CREATE_ALLOW_DERIVATIVES_BIT;
+	// Debug-only control (see log_pipeline_executable_statistics): tests whether NVIDIA's driver
+	// reports statistics for compute pipelines even if it doesn't for RT pipelines.
+	if (vk::is_device_extension_enabled(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)) {
+		pipeline_CI.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+	}
 	pipeline_CI.layout = pipeline_layout;
 	vk::check(vkCreateComputePipelines(vk::context().device, VK_NULL_HANDLE, 1, &pipeline_CI, nullptr, &handle));
+	log_pipeline_executable_statistics(handle, name);
 	vkDestroyShaderModule(vk::context().device, compute_shader_module, nullptr);
 	if (!name.empty()) {
 		vk::DebugMarker::set_resource_name(vk::context().device, (uint64_t)handle, name.c_str(),

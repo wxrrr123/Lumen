@@ -67,6 +67,10 @@ class ReSTIRPT final : public Integrator {
 	float gris_separator = 1.0f;
 	uint32_t path_length = 0;
 	uint32_t num_spatial_samples = 3;
+	// SER cost-key reorder experiment variant, set once from LUMEN_SER_VARIANT in init() (A/B/C/D,
+	// default A -- see divergence-study/results-2026-09-02-ser-reorder.md).
+	bool ser_enable_cost_reorder = false;	// D, C
+	bool ser_enable_reorder_call = false;	// B, C
 	static constexpr float compact_ratio = 1.0f;
 	// Must match NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS in spatial_reuse.rgen
 	static constexpr uint32_t NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS = 32;

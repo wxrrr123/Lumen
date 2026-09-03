@@ -17,7 +17,10 @@ RayTracer::RayTracer(bool debug, int argc, char* argv[]) : debug(debug) {
 }
 
 void RayTracer::init() {
-	srand((uint32_t)time(NULL));
+	// LUMEN_FIXED_SEED: override the wall-clock RNG seed for reproducible A/B comparisons across
+	// separate process runs (e.g. SER variant correctness validation -- see
+	// divergence-study/results-2026-09-02-ser-reorder.md). Off by default (real time, as before).
+	srand(getenv("LUMEN_FIXED_SEED") ? (uint32_t)atoi(getenv("LUMEN_FIXED_SEED")) : (uint32_t)time(NULL));
 	Window::add_key_callback([this](KeyInput key, KeyAction action) {
 		if (Window::is_key_down(KeyInput::KEY_F1)) {
 			show_ui = !show_ui;
@@ -48,8 +51,23 @@ void RayTracer::init() {
 	vk::add_device_extension(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
 	vk::add_device_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 	vk::add_device_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+	// SER cost-key reorder experiment (handoff 2026-09-02): OPTIONAL, not required -- Ampere
+	// (3070) doesn't support it and must still start up normally. Added only if
+	// context().physical_device actually reports it; check vk::is_device_extension_enabled(...)
+	// after vk::init() to see what happened. Never add this via add_device_extension() (hard
+	// requirement) -- that would make device selection fail outright on unsupported hardware.
+	vk::add_optional_device_extension(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME);
+	// Real per-pipeline register counts (vkGetPipelineExecutableStatisticsKHR), used to check
+	// whether SER's reorder point raises Retrace's register pressure (see
+	// divergence-study/results-2026-09-02-ser-reorder.md). Also optional -- must not block
+	// startup on hardware/drivers that lack it.
+	vk::add_optional_device_extension(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
 
 	vk::init(debug);
+	LUMEN_TRACE("[SER] VK_NV_ray_tracing_invocation_reorder enabled: {}",
+			   vk::is_device_extension_enabled(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME));
+	LUMEN_TRACE("[SER] VK_KHR_pipeline_executable_properties enabled: {}",
+			   vk::is_device_extension_enabled(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME));
 	initialized = true;
 
 	// Enable shader reflections for the render graph
@@ -477,6 +495,38 @@ float RayTracer::draw_frame() {
 	}
 	bool time_limit = (abs(diff / CLOCKS_PER_SEC - 5)) < 0.1;
 	calc_rmse = time_limit;
+
+	// SER cost-key reorder experiment: per-pass GPU timestamp readout (GPUQueryManager is already
+	// per-render-graph-pass and immune to vsync/present pacing -- see
+	// divergence-study/results-2026-09-02-ser-reorder.md). Gated by env var, same 5s cadence as
+	// the RMSE log above, so it doesn't spam every frame.
+	if (time_limit && getenv("LUMEN_LOG_GPU_TIMING")) {
+		auto& query_results = GPUQueryManager::get();
+		if (query_results.size > 0) {
+			uint64_t gpu_start = query_results.timestamps[0];
+			uint64_t gpu_end = query_results.timestamps[query_results.size - 1];
+			LUMEN_TRACE("[SER] frame {} GPU full-frame time: {:.4f} ms", integrator->frame_num,
+						(gpu_end - gpu_start) * 1e-6);
+			// Prefix match, not exact: the render graph suffixes active macros onto the pass name
+			// (e.g. "GRIS - Retrace Reservoirs(ENABLE_COST_REORDER)"), so an exact match only ever
+			// hits variant A (no macros enabled -> no suffix).
+			bool found_retrace = false;
+			for (size_t i = 0; i < query_results.size; i += 2) {
+				if (query_results.names[i >> 1].rfind("GRIS - Retrace Reservoirs", 0) == 0) {
+					found_retrace = true;
+					double diff_ms = (query_results.timestamps[i + 1] - query_results.timestamps[i]) * 1e-6;
+					LUMEN_TRACE("[SER] frame {} GPU 'GRIS - Retrace Reservoirs' time: {:.4f} ms", integrator->frame_num,
+								diff_ms);
+				}
+			}
+			if (!found_retrace && getenv("LUMEN_LOG_GPU_TIMING_DEBUG")) {
+				for (size_t i = 0; i < query_results.size; i += 2) {
+					LUMEN_TRACE("[SER-DEBUG] frame {} pass[{}] = '{}'", integrator->frame_num, i >> 1,
+								query_results.names[i >> 1]);
+				}
+			}
+		}
+	}
 
 	if (calc_rmse && has_gt) {
 		float rmse = *(float*)vk::map_buffer(rmse_val_buffer);
