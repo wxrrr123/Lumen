@@ -1,0 +1,467 @@
+<scene version="3.0.0">
+	<default name="integrator" value="path" />
+	<default name="spp" value="64" />
+	<default name="resy" value="720" />
+	<default name="resx" value="1280" />
+	<default name="max_depth" value="65" />
+	<integrator type="$integrator">
+		<integer name="max_depth" value="$max_depth" />
+	</integrator>
+	<sensor type="perspective">
+		<float name="fov" value="60" />
+		<transform name="to_world">
+			<matrix value="-0.8328 0.182353 0.522677 1.26897 0 0.944187 -0.329411 5.08319 -0.553573 -0.274334 -0.786319 8.197 0 0 0 1" />
+		</transform>
+		<sampler type="independent">
+			<integer name="sample_count" value="$spp" />
+		</sampler>
+		<film type="hdrfilm">
+			<integer name="width" value="$resx" />
+			<integer name="height" value="$resy" />
+			<string name="file_format" value="openexr" />
+			<string name="pixel_format" value="rgb" />
+			<rfilter type="tent" />
+		</film>
+	</sensor>
+	<bsdf type="twosided" id="CarPaintBSDF">
+		<bsdf type="twosided">
+			<bsdf type="roughconductor">
+				<float name="alpha" value="0.1" />
+				<string name="distribution" value="ggx" />
+				<rgb name="specular_reflectance" value="0.25, 0.25, 0.95" />
+				<rgb name="eta" value="1.65746, 0.880369, 0.521229" />
+				<rgb name="k" value="9.22387, 6.26952, 4.837" />
+			</bsdf>
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="ChromeBSDF">
+		<bsdf type="roughconductor">
+			<float name="alpha" value="0.01" />
+			<string name="distribution" value="ggx" />
+			<rgb name="specular_reflectance" value="1, 1, 1" />
+			<rgb name="eta" value="4.36968, 2.9167, 1.6547" />
+			<rgb name="k" value="5.20643, 4.23136, 3.75495" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="WheelPaintBSDF">
+		<bsdf type="diffuse">
+			<rgb name="reflectance" value="0.560784, 0.560784, 0.278431" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="WhiteRubberBSDF">
+		<bsdf type="roughplastic">
+			<float name="alpha" value="0.4" />
+			<string name="distribution" value="ggx" />
+			<float name="int_ior" value="1.5" />
+			<float name="ext_ior" value="1" />
+			<boolean name="nonlinear" value="true" />
+			<rgb name="diffuse_reflectance" value="0.47451, 0.47451, 0.47451" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="DarkRubberBSDF">
+		<bsdf type="roughplastic">
+			<float name="alpha" value="0.4" />
+			<string name="distribution" value="ggx" />
+			<float name="int_ior" value="1.5" />
+			<float name="ext_ior" value="1" />
+			<boolean name="nonlinear" value="true" />
+			<rgb name="diffuse_reflectance" value="0.01, 0.01, 0.01" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="thindielectric" id="WindowGlassBSDF">
+		<float name="int_ior" value="1.5" />
+		<float name="ext_ior" value="1" />
+	</bsdf>
+	<bsdf type="twosided" id="SeatsBSDF">
+		<bsdf type="diffuse">
+			<rgb name="reflectance" value="0.8, 0.8, 0.8" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="ExhaustBSDF">
+		<bsdf type="diffuse">
+			<rgb name="reflectance" value="0.137255, 0.0941176, 0.0666667" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="CarBottomBSDF">
+		<bsdf type="diffuse">
+			<rgb name="reflectance" value="0.1, 0.1, 0.1" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="GroundBSDF">
+		<bsdf type="diffuse">
+			<rgb name="reflectance" value="0.1, 0.1, 0.1" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="RoughSteelBSDF">
+		<bsdf type="roughconductor">
+			<float name="alpha" value="0.1" />
+			<string name="distribution" value="ggx" />
+			<rgb name="specular_reflectance" value="1, 1, 1" />
+			<rgb name="eta" value="4.36968, 2.9167, 1.6547" />
+			<rgb name="k" value="5.20643, 4.23136, 3.75495" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="RadiatorBSDF">
+		<bsdf type="diffuse">
+			<rgb name="reflectance" value="0.028991, 0.028991, 0.028991" />
+		</bsdf>
+	</bsdf>
+	<bsdf type="twosided" id="WheelColumnBSDF">
+		<bsdf type="diffuse">
+			<rgb name="reflectance" value="0.578596, 0.578596, 0.578596" />
+		</bsdf>
+	</bsdf>
+	<shape type="obj" id="Seats_0001">
+		<string name="filename" value="models/Mesh014.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="SeatsBSDF" />
+	</shape>
+	<shape type="obj" id="Seats_0002">
+		<string name="filename" value="models/Mesh017.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="SeatsBSDF" />
+	</shape>
+	<shape type="obj" id="Seats_0003">
+		<string name="filename" value="models/Mesh018.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="SeatsBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0001">
+		<string name="filename" value="models/Mesh009.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="WheelColumn">
+		<string name="filename" value="models/Mesh016.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="WheelColumnBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0002">
+		<string name="filename" value="models/Mesh023.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0003">
+		<string name="filename" value="models/Mesh022.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0004">
+		<string name="filename" value="models/Mesh010.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="WindowGlass_0001">
+		<string name="filename" value="models/Mesh003.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="WindowGlassBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0005">
+		<string name="filename" value="models/Mesh024.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="CarPaint_0001">
+		<string name="filename" value="models/Mesh002.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="CarPaintBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0006">
+		<string name="filename" value="models/Mesh044.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="CarPaint_0002">
+		<string name="filename" value="models/Mesh021.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="CarPaintBSDF" />
+	</shape>
+	<shape type="obj" id="CarPaint_0003">
+		<string name="filename" value="models/Mesh020.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="CarPaintBSDF" />
+	</shape>
+	<shape type="obj" id="DarkRubber_0001">
+		<string name="filename" value="models/Mesh041.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="DarkRubberBSDF" />
+	</shape>
+	<shape type="obj" id="Seats_0004">
+		<string name="filename" value="models/Mesh006.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="SeatsBSDF" />
+	</shape>
+	<shape type="obj" id="RoughSteel_0001">
+		<string name="filename" value="models/Mesh004.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="RoughSteelBSDF" />
+	</shape>
+	<shape type="obj" id="RoughSteel_0002">
+		<string name="filename" value="models/Mesh042.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="RoughSteelBSDF" />
+	</shape>
+	<shape type="obj" id="RoughSteel_0003">
+		<string name="filename" value="models/Mesh007.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="RoughSteelBSDF" />
+	</shape>
+	<shape type="obj" id="RoughSteel_0004">
+		<string name="filename" value="models/Mesh001.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="RoughSteelBSDF" />
+	</shape>
+	<shape type="obj" id="DarkRubber_0002">
+		<string name="filename" value="models/Mesh011.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="DarkRubberBSDF" />
+	</shape>
+	<shape type="obj" id="WhiteRubber">
+		<string name="filename" value="models/Mesh015.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="WhiteRubberBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0007">
+		<string name="filename" value="models/Mesh037.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0008">
+		<string name="filename" value="models/Mesh026.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0009">
+		<string name="filename" value="models/Mesh028.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0010">
+		<string name="filename" value="models/Mesh046.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="WindowGlass_0002">
+		<string name="filename" value="models/Mesh031.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="WindowGlassBSDF" />
+	</shape>
+	<shape type="obj" id="WindowGlass_0003">
+		<string name="filename" value="models/Mesh032.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="WindowGlassBSDF" />
+	</shape>
+	<shape type="obj" id="CarBottom_0001">
+		<string name="filename" value="models/Mesh034.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="CarBottomBSDF" />
+	</shape>
+	<shape type="obj" id="CarBottom_0002">
+		<string name="filename" value="models/Mesh033.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="CarBottomBSDF" />
+	</shape>
+	<shape type="obj" id="CarBottom_0003">
+		<string name="filename" value="models/Mesh035.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="CarBottomBSDF" />
+	</shape>
+	<shape type="obj" id="CarBottom_0004">
+		<string name="filename" value="models/Mesh036.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="CarBottomBSDF" />
+	</shape>
+	<shape type="obj" id="CarBottom_0005">
+		<string name="filename" value="models/Mesh038.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="CarBottomBSDF" />
+	</shape>
+	<shape type="obj" id="Exhaust">
+		<string name="filename" value="models/Mesh040.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ExhaustBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0011">
+		<string name="filename" value="models/Mesh029.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0012">
+		<string name="filename" value="models/Mesh025.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="RoughSteel_0005">
+		<string name="filename" value="models/Mesh012.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="RoughSteelBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0013">
+		<string name="filename" value="models/Mesh030.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="Chrome_0014">
+		<string name="filename" value="models/Mesh019.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="ChromeBSDF" />
+	</shape>
+	<shape type="obj" id="Radiator">
+		<string name="filename" value="models/Mesh013.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="RadiatorBSDF" />
+	</shape>
+	<shape type="obj" id="WheelPaint">
+		<string name="filename" value="models/Mesh043.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="WheelPaintBSDF" />
+	</shape>
+	<shape type="obj" id="RoughSteel_0006">
+		<string name="filename" value="models/Mesh045.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="RoughSteelBSDF" />
+	</shape>
+	<shape type="obj" id="RoughSteel_0007">
+		<string name="filename" value="models/Mesh005.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="RoughSteelBSDF" />
+	</shape>
+	<shape type="obj" id="RoughSteel_0008">
+		<string name="filename" value="models/Mesh039.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="RoughSteelBSDF" />
+	</shape>
+	<shape type="obj" id="CarPaint_0004">
+		<string name="filename" value="models/Mesh047.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="CarPaintBSDF" />
+	</shape>
+	<shape type="obj" id="CarBottom_0006">
+		<string name="filename" value="models/Mesh008.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<boolean name="face_normals" value="true" />
+		<ref id="CarBottomBSDF" />
+	</shape>
+	<shape type="obj" id="CarBottom_0007">
+		<string name="filename" value="models/Mesh000.obj" />
+		<transform name="to_world">
+			<matrix value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1" />
+		</transform>
+		<ref id="CarBottomBSDF" />
+	</shape>
+	<shape type="obj" id="Ground">
+		<string name="filename" value="models/Mesh027.obj" />
+		<transform name="to_world">
+			<matrix value="0.819566 0 0.572984 30.9097 0 1 0 9.47137 -0.572984 0 0.819566 -4.60303 0 0 0 1" />
+		</transform>
+		<ref id="GroundBSDF" />
+	</shape>
+	<emitter type="envmap">
+		<transform name="to_world">
+			<matrix value="-4.37114e-008 0 1 0 0 1 0 0 -1 0 -4.37114e-008 0 0 0 0 1" />
+		</transform>
+		<string name="filename" value="textures/envmap.pfm" />
+	</emitter>
+</scene>

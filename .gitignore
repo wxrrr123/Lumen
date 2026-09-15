@@ -16,3 +16,6 @@ scenes/bedroom/models
 scenes/classroom/models/
 scenes/bedroom/textures
 scenes/classroom/textures
+scenes/*/models/
+scenes/*/textures/
+scenes/*/TungstenRender.*

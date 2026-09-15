@@ -25,8 +25,62 @@
 #include "shaders/commons.h"
 #include <cctype>
 #include "Framework/PersistentResourceManager.h"
+#include "Framework/ImageUtils.h"
 #include <iostream>
 #include <cstdio>
+
+// Mean RGB of an HDR image (.exr via tinyexr, .hdr via stb_image, .pfm parsed here).
+static glm::vec3 mean_hdr_color(const std::string& path) {
+	int w = 0, h = 0;
+	std::vector<float> pixels;
+	int channels = 3;
+	const std::string ext = path.size() >= 4 ? path.substr(path.size() - 4) : "";
+	if (ext == ".exr") {
+		float* data = ImageUtils::load_exr(path.c_str(), w, h);
+		if (!data) {
+			return glm::vec3(1);
+		}
+		channels = 4;
+		pixels.assign(data, data + (size_t)w * h * channels);
+		free(data);
+	} else if (ext == ".pfm") {
+		std::ifstream f(path, std::ios::binary);
+		std::string magic;
+		float scale;
+		f >> magic >> w >> h >> scale;
+		f.get();
+		channels = magic == "PF" ? 3 : 1;
+		pixels.resize((size_t)w * h * channels);
+		f.read((char*)pixels.data(), pixels.size() * sizeof(float));
+		if (!f) {
+			return glm::vec3(1);
+		}
+	} else {
+		int n = 0;
+		float* data = stbi_loadf(path.c_str(), &w, &h, &n, 3);
+		if (!data) {
+			return glm::vec3(1);
+		}
+		pixels.assign(data, data + (size_t)w * h * 3);
+		stbi_image_free(data);
+	}
+	if (w <= 0 || h <= 0) {
+		return glm::vec3(1);
+	}
+	// Weight rows by sin(latitude) since equirectangular maps oversample the poles
+	glm::dvec3 sum(0);
+	double weight_sum = 0;
+	for (int y = 0; y < h; y++) {
+		const double wgt = std::sin(glm::pi<double>() * (y + 0.5) / h);
+		for (int x = 0; x < w; x++) {
+			const float* p = &pixels[((size_t)y * w + x) * channels];
+			const glm::dvec3 c = channels == 1 ? glm::dvec3(p[0]) : glm::dvec3(p[0], p[1], p[2]);
+			sum += c * wgt;
+			weight_sum += wgt;
+		}
+	}
+	return glm::vec3(sum / weight_sum);
+}
 
 static bool ends_with(const std::string& str, const std::string& end) {
 	if (end.size() > str.size()) return false;
@@ -84,7 +138,7 @@ void LumenScene::load_scene(const std::string& path) {
 		prim_lookup.emplace_back(m_info);
 		auto& mef = materials[pm.material_idx].emissive_factor;
 		if (mef.x > 0 || mef.y > 0 || mef.z > 0) {
-			Light light;
+			Light light{};
 			light.world_matrix = pm.world_matrix;
 			light.num_triangles = pm.idx_count / 3;
 			light.prim_mesh_idx = idx;
@@ -100,7 +154,7 @@ void LumenScene::load_scene(const std::string& path) {
 
 	for (auto i = 0; i < lights.size(); i++) {
 		auto& l = lights[i];
-		Light light;
+		Light light{};
 		light.L = l.L;
 		light.light_flags = l.light_flags;
 		light.pos = l.pos;
@@ -109,7 +163,7 @@ void LumenScene::load_scene(const std::string& path) {
 		light.world_radius = m_dimensions.radius;
 		light.world_center = 0.5f * (m_dimensions.max + m_dimensions.min);
 		if ((l.light_flags & LIGHT_DIRECTIONAL) == LIGHT_DIRECTIONAL) {
-			dir_light_idx = i;
+			dir_light_idx = (uint32_t)gpu_lights.size();
 		}
 		gpu_lights.emplace_back(light);
 	}
@@ -133,16 +187,18 @@ void LumenScene::load_scene(const std::string& path) {
 			}
 		}
 	}
-	if (gpu_lights.size()) {
-		// mesh_lights_buffer.create("Mesh Lights Buffer", VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-		// 						  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, gpu_lights.size() * sizeof(Light),
-		// 						  gpu_lights.data(), true);
-
+	{
+		// Always create the buffer: integrators bind it unconditionally. Scenes lit only by the
+		// sky have no lights, so upload a single dummy entry (num_lights stays 0).
+		std::vector<Light> upload = gpu_lights;
+		if (upload.empty()) {
+			upload.emplace_back();
+		}
 		mesh_lights_buffer = prm::get_buffer({.name = "Mesh Lights Buffer",
 											  .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 											  .memory_type = vk::BufferType::GPU,
-											  .size = gpu_lights.size() * sizeof(Light),
-											  .data = gpu_lights.data()});
+											  .size = upload.size() * sizeof(Light),
+											  .data = upload.data()});
 	}
 	total_light_area += total_light_triangle_area;
 	vertex_buffer = prm::get_buffer({.name = "Vertex Buffer",
@@ -542,13 +598,19 @@ void LumenScene::load_mitsuba_scene(const std::string& path) {
 	MitsubaParser mitsuba_parser;
 	mitsuba_parser.parse(path);
 
-    std::cout << ">>> [HACK] Forcing Integrator Type to: RESTIRPT" << std::endl;
-    create_scene_config("restirpt"); 
+	create_scene_config(mitsuba_parser.integrator.type);
 
 	SceneConfig* curr_config = config.get();
 
 	curr_config->path_length = mitsuba_parser.integrator.depth;
 	curr_config->sky_col = mitsuba_parser.integrator.sky_col;
+	if (!mitsuba_parser.envmap.file.empty()) {
+		// Lumen has no environment map support; approximate it with a constant sky of the map's mean radiance
+		const glm::vec3 mean = mean_hdr_color(root + mitsuba_parser.envmap.file);
+		curr_config->sky_col = mean * mitsuba_parser.envmap.scale;
+		LUMEN_WARN("Mitsuba: envmap '{}' approximated by constant sky ({}, {}, {})", mitsuba_parser.envmap.file,
+				   curr_config->sky_col.x, curr_config->sky_col.y, curr_config->sky_col.z);
+	}
 	// TODO: Introduce other config settings for Mitsuba format
 	if (mitsuba_parser.integrator.type == "vcm") {
 		((VCMConfig*)curr_config)->integrator_type = IntegratorType::VCM;
@@ -556,146 +618,310 @@ void LumenScene::load_mitsuba_scene(const std::string& path) {
 	}
 
 	// Camera
-	curr_config->cam_settings.fov = mitsuba_parser.camera.fov / 2;
-	curr_config->cam_settings.cam_matrix = mitsuba_parser.camera.cam_matrix;
-	prim_meshes.resize(mitsuba_parser.meshes.size());
-	// Load objs
-	int i = 0;
-	for (const auto& mesh : mitsuba_parser.meshes) {
-		if (mesh.file == "") {
-			continue;
+	// Mitsuba's fov is measured along fov_axis (x by default); Lumen wants the full vertical fov.
+	{
+		const auto& cam = mitsuba_parser.camera;
+		const float film_aspect = (float)cam.film_width / (float)cam.film_height;
+		const float half_fov = glm::radians(cam.fov) * 0.5f;
+		float vertical_fov;
+		const bool fov_is_x = cam.fov_axis == "x" || (cam.fov_axis == "larger" && film_aspect >= 1.0f) ||
+							  (cam.fov_axis == "smaller" && film_aspect < 1.0f);
+		if (cam.fov_axis == "diagonal") {
+			const float diag = std::sqrt(1.0f + film_aspect * film_aspect);
+			vertical_fov = 2.0f * std::atan(std::tan(half_fov) / diag);
+		} else if (fov_is_x) {
+			vertical_fov = 2.0f * std::atan(std::tan(half_fov) / film_aspect);
+		} else {
+			vertical_fov = 2.0f * half_fov;
 		}
-		const std::string mesh_file = root + mesh.file;
-		tinyobj::ObjReaderConfig reader_config;
-
-		tinyobj::ObjReader reader;
-		if (!reader.ParseFromFile(mesh_file, reader_config)) {
-			if (!reader.Error().empty()) {
-				std::cerr << "TinyObjReader: " << reader.Error();
-			}
-			exit(1);
-		}
-
-		if (!reader.Warning().empty()) {
-			std::cout << "TinyObjReader: " << reader.Warning();
-		}
-
-		auto& attrib = reader.GetAttrib();
-		auto& shapes = reader.GetShapes();
-		assert(shapes.size() == 1);
-		prim_meshes[i].first_idx = (uint32_t)indices.size();
-		prim_meshes[i].vtx_offset = (uint32_t)positions.size();
-		prim_meshes[i].name = shapes[0].name;
-		prim_meshes[i].idx_count = (uint32_t)shapes[0].mesh.indices.size();
-		prim_meshes[i].vtx_count = (uint32_t)shapes[0].mesh.num_face_vertices.size();
-		prim_meshes[i].prim_idx = i;
-		glm::vec3 min_vtx = glm::vec3(FLT_MAX);
-		glm::vec3 max_vtx = glm::vec3(-FLT_MAX);
-		uint32_t index_offset = 0;
-		uint32_t idx_val = 0;
-		for (uint32_t f = 0; f < shapes[0].mesh.num_face_vertices.size(); f++) {
-			for (uint32_t v = 0; v < 3; v++) {
-				tinyobj::index_t idx = shapes[0].mesh.indices[index_offset + v];
-				indices.push_back(idx_val++);
-				tinyobj::real_t vx = attrib.vertices[3 * uint32_t(idx.vertex_index) + 0];
-				tinyobj::real_t vy = attrib.vertices[3 * uint32_t(idx.vertex_index) + 1];
-				tinyobj::real_t vz = attrib.vertices[3 * uint32_t(idx.vertex_index) + 2];
-				positions.emplace_back(vx, vy, vz);
-				min_vtx = glm::min(positions[positions.size() - 1], min_vtx);
-				max_vtx = glm::max(positions[positions.size() - 1], max_vtx);
-				if (idx.normal_index >= 0) {
-					tinyobj::real_t nx = attrib.normals[3 * uint32_t(idx.normal_index) + 0];
-					tinyobj::real_t ny = attrib.normals[3 * uint32_t(idx.normal_index) + 1];
-					tinyobj::real_t nz = attrib.normals[3 * uint32_t(idx.normal_index) + 2];
-					normals.emplace_back(nx, ny, nz);
-				}
-				if (idx.texcoord_index >= 0) {
-					tinyobj::real_t tx = attrib.texcoords[2 * uint32_t(idx.texcoord_index) + 0];
-					tinyobj::real_t ty = attrib.texcoords[2 * uint32_t(idx.texcoord_index) + 1];
-					texcoords0.emplace_back(tx, ty);
-				}
-			}
-
-			index_offset += 3;
-		}
-		prim_meshes[i].min_pos = min_vtx;
-		prim_meshes[i].max_pos = max_vtx;
-		prim_meshes[i].world_matrix = mesh.transform;
-		prim_meshes[i].material_idx = mesh.bsdf_idx;
-		i++;
+		curr_config->cam_settings.fov = glm::degrees(vertical_fov);
+		// Mitsuba camera space: +x left, +y up, looks along +z. Lumen: +x right, +y up, looks along -z.
+		glm::mat4 cam_matrix = cam.cam_matrix;
+		cam_matrix[0] = -cam_matrix[0];
+		cam_matrix[2] = -cam_matrix[2];
+		curr_config->cam_settings.cam_matrix = cam_matrix;
 	}
 
-    auto make_default_principled = [](Material& m) {
-        m.metallic = 0; m.emissive_factor = glm::vec3(0); 
-    };
-    i = 0;
-    materials.resize(mitsuba_parser.bsdfs.size());
-    
-    std::cout << "--- [DEBUG] Loading Materials & Applying Hacks ---" << std::endl;
-    
-    for (const auto& m_bsdf : mitsuba_parser.bsdfs) {
-        if (m_bsdf.texture != "") {
-            textures.push_back(root + m_bsdf.texture);
-            materials[i].texture_id = (int)textures.size() - 1;
-        } else {
-            materials[i].texture_id = -1;
-        }
-        Material& mat = materials[i];
-        make_default_principled(mat);
-        mat.albedo = m_bsdf.albedo;
-        mat.roughness = m_bsdf.roughness;
+	// Load geometry. Rectangle/disk emitters are emitted twice: the emitter itself and, flipped
+	// and nudged behind it, a black backing face (see MitsubaParser::backing_bsdf_idx).
+	std::vector<std::pair<MitsubaParser::MitsubaMesh, bool>> mesh_jobs;
+	for (const auto& mesh : mitsuba_parser.meshes) {
+		mesh_jobs.emplace_back(mesh, false);
+		if (mesh.backing_bsdf_idx >= 0) {
+			mesh_jobs.emplace_back(mesh, true);
+		}
+	}
+	for (const auto& [mesh, is_backing] : mesh_jobs) {
+		if (mesh.shape == MitsubaParser::MitsubaShape::Unsupported) {
+			continue;
+		}
+		// Backing face: normal -z, offset ~1mm behind the emitter (in local units)
+		const float backing_offset = is_backing ? -1e-3f / std::max(glm::length(glm::vec3(mesh.transform[2])), 1e-6f) : 0.0f;
+		const glm::vec3 flat_normal(0, 0, is_backing ? -1 : 1);
+		LumenPrimMesh prim_mesh;
+		prim_mesh.first_idx = (uint32_t)indices.size();
+		prim_mesh.vtx_offset = (uint32_t)positions.size();
+		prim_mesh.prim_idx = (uint32_t)prim_meshes.size();
+		prim_mesh.world_matrix = mesh.transform;
+		prim_mesh.material_idx = is_backing ? mesh.backing_bsdf_idx : mesh.bsdf_idx;
+		glm::vec3 min_vtx = glm::vec3(FLT_MAX);
+		glm::vec3 max_vtx = glm::vec3(-FLT_MAX);
+		uint32_t idx_val = 0;
+		auto push_vertex = [&](const glm::vec3& p, const glm::vec3& n, const glm::vec2& uv) {
+			indices.push_back(idx_val++);
+			positions.push_back(p);
+			normals.push_back(n);
+			texcoords0.push_back(uv);
+			min_vtx = glm::min(p, min_vtx);
+			max_vtx = glm::max(p, max_vtx);
+		};
+		if (mesh.shape == MitsubaParser::MitsubaShape::Rectangle) {
+			// Mitsuba rectangle: [-1, 1]^2 on the XY plane, normal +z
+			const glm::vec3 p[4] = {{-1, -1, backing_offset}, {1, -1, backing_offset}, {1, 1, backing_offset}, {-1, 1, backing_offset}};
+			const glm::vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+			const int tris[6] = {0, 1, 2, 0, 2, 3};
+			for (int k = 0; k < 6; k++) {
+				const int idx = is_backing ? tris[5 - k] : tris[k];  // reverse winding for the backing
+				push_vertex(p[idx], flat_normal, uv[idx]);
+			}
+			prim_mesh.name = (is_backing ? "rectangle_backing_" : "rectangle_") + std::to_string(prim_mesh.prim_idx);
+		} else if (mesh.shape == MitsubaParser::MitsubaShape::Disk) {
+			// Mitsuba disk: unit radius on the XY plane, normal +z
+			constexpr int segments = 32;
+			for (int k = 0; k < segments; k++) {
+				const float a0 = glm::two_pi<float>() * k / segments;
+				const float a1 = glm::two_pi<float>() * (k + 1) / segments;
+				glm::vec3 p0(std::cos(a0), std::sin(a0), backing_offset);
+				glm::vec3 p1(std::cos(a1), std::sin(a1), backing_offset);
+				if (is_backing) {
+					std::swap(p0, p1);  // reverse winding for the backing
+				}
+				push_vertex(glm::vec3(0, 0, backing_offset), flat_normal, glm::vec2(0.5f));
+				push_vertex(p0, flat_normal, glm::vec2(p0) * 0.5f + 0.5f);
+				push_vertex(p1, flat_normal, glm::vec2(p1) * 0.5f + 0.5f);
+			}
+			prim_mesh.name = (is_backing ? "disk_backing_" : "disk_") + std::to_string(prim_mesh.prim_idx);
+		} else if (mesh.shape == MitsubaParser::MitsubaShape::Cube) {
+			// Mitsuba cube: [-1, 1]^3, outward normals
+			const glm::vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+			for (int a = 0; a < 3; a++) {
+				for (int sgn = -1; sgn <= 1; sgn += 2) {
+					const glm::vec3 n = axes[a] * (float)sgn;
+					const glm::vec3 u = axes[(a + 1) % 3];
+					const glm::vec3 v = axes[(a + 2) % 3];
+					// Corner order chosen so the winding is counter-clockwise seen from outside
+					const glm::vec3 c[4] = {n - u - v, n + (sgn > 0 ? u : v) - (sgn > 0 ? v : u), n + u + v,
+											n + (sgn > 0 ? v : u) - (sgn > 0 ? u : v)};
+					const glm::vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+					const int tris[6] = {0, 1, 2, 0, 2, 3};
+					for (int k = 0; k < 6; k++) {
+						push_vertex(c[tris[k]], n, uv[tris[k]]);
+					}
+				}
+			}
+			prim_mesh.name = "cube_" + std::to_string(prim_mesh.prim_idx);
+		} else if (mesh.shape == MitsubaParser::MitsubaShape::Sphere) {
+			// UV sphere tessellation of Mitsuba's sphere (center/radius in local space)
+			constexpr int rings = 32, segs = 64;
+			auto point = [&](int r, int sg, glm::vec3& p, glm::vec3& n) {
+				const float theta = glm::pi<float>() * r / rings;
+				const float phi = glm::two_pi<float>() * sg / segs;
+				n = glm::vec3(std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi));
+				p = mesh.sphere_center + mesh.sphere_radius * n;
+			};
+			for (int r = 0; r < rings; r++) {
+				for (int sg = 0; sg < segs; sg++) {
+					glm::vec3 p00, n00, p10, n10, p01, n01, p11, n11;
+					point(r, sg, p00, n00);
+					point(r + 1, sg, p10, n10);
+					point(r, sg + 1, p01, n01);
+					point(r + 1, sg + 1, p11, n11);
+					const glm::vec2 uv(float(sg) / segs, float(r) / rings);
+					if (r > 0) {
+						push_vertex(p00, n00, uv);
+						push_vertex(p10, n10, uv);
+						push_vertex(p01, n01, uv);
+					}
+					if (r < rings - 1) {
+						push_vertex(p01, n01, uv);
+						push_vertex(p10, n10, uv);
+						push_vertex(p11, n11, uv);
+					}
+				}
+			}
+			prim_mesh.name = "sphere_" + std::to_string(prim_mesh.prim_idx);
+		} else {
+			const std::string mesh_file = root + mesh.file;
+			tinyobj::ObjReaderConfig reader_config;
 
-        // =========================================================
-        // [FIX] 2. 燈管材質 Hack (強度 20)
-        // =========================================================
-        bool is_tube = (std::abs(mat.albedo.x - 0.6478f) < 0.001f); 
-        if (is_tube && std::abs(mat.albedo.x - mat.albedo.y) < 0.001f) {
-            std::cout << ">>> [HACK] TUBE FOUND! Turning Material [" << i << "] into Light Source!" << std::endl;
-            mat.emissive_factor = glm::vec3(20.0f, 20.0f, 20.0f); 
-        }
-        
-        // 設定 BSDF 屬性...
-        if (m_bsdf.type == "diffuse") {
-            bsdf_types |= BSDF_TYPE_DIFFUSE; mat.bsdf_type = BSDF_TYPE_DIFFUSE; mat.bsdf_props = BSDF_FLAG_DIFFUSE_REFLECTION;
-        } else if (m_bsdf.type == "roughplastic" || m_bsdf.type == "roughdielectric" || m_bsdf.type == "dielectric" || m_bsdf.type == "plastic") {
-            bsdf_types |= BSDF_TYPE_PRINCIPLED; mat.bsdf_type = BSDF_TYPE_PRINCIPLED; mat.ior = m_bsdf.ior;
-            if (mat.roughness < 1.0) mat.bsdf_props |= BSDF_FLAG_DIFFUSE_REFLECTION;
-            if (mat.ior != 1.0) mat.bsdf_props |= BSDF_FLAG_TRANSMISSION;
-            if (mat.roughness > 0.08) mat.bsdf_props |= BSDF_FLAG_GLOSSY; else mat.bsdf_props |= BSDF_FLAG_SPECULAR;
-            if (m_bsdf.type == "roughdielectric" || m_bsdf.type == "dielectric") { mat.spec_trans = 1.0; mat.metallic = 0.0; }
-            if (m_bsdf.type == "roughplastic" || m_bsdf.type == "plastic") { mat.metallic = 1.0; mat.subsurface = 0.1f; mat.spec_trans = 0.5; mat.thin = 1; }
-        } else if (m_bsdf.type == "conductor" || m_bsdf.type == "roughconductor") {
-            bsdf_types |= BSDF_TYPE_CONDUCTOR; mat.bsdf_type = BSDF_TYPE_CONDUCTOR;
-            reflectance_to_conductor_eta_k(m_bsdf.albedo, mat.albedo, mat.k);
-            mat.bsdf_props = BSDF_FLAG_REFLECTION;
-            if (mat.roughness > 0.08) mat.bsdf_props |= BSDF_FLAG_GLOSSY; else mat.bsdf_props |= BSDF_FLAG_SPECULAR;
-        } else if (m_bsdf.type == "glass") {
-            bsdf_types |= BSDF_TYPE_GLASS; mat.bsdf_type = BSDF_TYPE_GLASS; mat.bsdf_props = BSDF_FLAG_SPECULAR_TRANSMISSION; mat.ior = m_bsdf.ior;
-        }
-        i++;
-    }
-    compute_scene_dimensions();
-    
-    // =========================================================
-    // [FIX] 3. 燈光過濾 (跳過太陽，只留燈管)
-    // =========================================================
-    i = 0;
-    lights.resize(0); 
-    for (auto& light : mitsuba_parser.lights) {
-        if (light.type == "directional" || light.type == "sunsky") {
-            std::cout << ">>> [DEBUG] Skipping SunSky/Directional light." << std::endl;
-            continue; 
-        }
-        // Classroom 通常只有 Sunsky，所以這邊基本上會清空 lights vector
-        // 但因為上面的材質 Hack，gpu_lights 還是會有燈管資料
-        lights.emplace_back(); 
-        auto& l = lights.back();
-        l.L = 100.0f * light.L;
-        l.pos = light.from;
-        l.to = light.to;
-        l.light_flags = LIGHT_SPOT;
-        i++;
-    }
+			tinyobj::ObjReader reader;
+			if (!reader.ParseFromFile(mesh_file, reader_config)) {
+				if (!reader.Error().empty()) {
+					std::cerr << "TinyObjReader: " << reader.Error();
+				}
+				exit(1);
+			}
+
+			if (!reader.Warning().empty()) {
+				std::cout << "TinyObjReader: " << reader.Warning();
+			}
+
+			auto& attrib = reader.GetAttrib();
+			auto& shapes = reader.GetShapes();
+			assert(shapes.size() == 1);
+			prim_mesh.name = shapes[0].name;
+			uint32_t index_offset = 0;
+			for (uint32_t f = 0; f < shapes[0].mesh.num_face_vertices.size(); f++) {
+				glm::vec3 p[3];
+				glm::vec3 n[3];
+				glm::vec2 uv[3];
+				bool has_normals = true;
+				for (uint32_t v = 0; v < 3; v++) {
+					tinyobj::index_t idx = shapes[0].mesh.indices[index_offset + v];
+					p[v] = glm::vec3(attrib.vertices[3 * uint32_t(idx.vertex_index) + 0],
+									 attrib.vertices[3 * uint32_t(idx.vertex_index) + 1],
+									 attrib.vertices[3 * uint32_t(idx.vertex_index) + 2]);
+					if (idx.normal_index >= 0) {
+						n[v] = glm::vec3(attrib.normals[3 * uint32_t(idx.normal_index) + 0],
+										 attrib.normals[3 * uint32_t(idx.normal_index) + 1],
+										 attrib.normals[3 * uint32_t(idx.normal_index) + 2]);
+					} else {
+						has_normals = false;
+					}
+					if (idx.texcoord_index >= 0) {
+						uv[v] = glm::vec2(attrib.texcoords[2 * uint32_t(idx.texcoord_index) + 0],
+										  attrib.texcoords[2 * uint32_t(idx.texcoord_index) + 1]);
+					} else {
+						uv[v] = glm::vec2(0);
+					}
+				}
+				if (!has_normals) {
+					// Fall back to the geometric normal so normals/positions stay in sync
+					glm::vec3 ng = glm::cross(p[1] - p[0], p[2] - p[0]);
+					const float len = glm::length(ng);
+					ng = len > 0 ? ng / len : glm::vec3(0, 0, 1);
+					n[0] = n[1] = n[2] = ng;
+				}
+				for (uint32_t v = 0; v < 3; v++) {
+					push_vertex(p[v], n[v], uv[v]);
+				}
+				index_offset += 3;
+			}
+		}
+		prim_mesh.idx_count = (uint32_t)indices.size() - prim_mesh.first_idx;
+		prim_mesh.vtx_count = (uint32_t)positions.size() - prim_mesh.vtx_offset;
+		prim_mesh.min_pos = min_vtx;
+		prim_mesh.max_pos = max_vtx;
+		prim_meshes.push_back(prim_mesh);
+	}
+
+	auto make_default_principled = [](Material& m) {
+		m.metallic = 0;
+		m.specular_tint = 0;
+		m.sheen_tint = 0.0;
+		m.clearcoat = 0;
+		m.clearcoat_gloss = 0;
+		m.subsurface = 0;
+		m.sheen = 0;
+		m.thin = 0;
+	};
+	int i = 0;
+	materials.resize(mitsuba_parser.bsdfs.size());
+	// Several BSDFs usually share the same bitmap; load each file once
+	std::unordered_map<std::string, int> texture_ids;
+	for (const auto& m_bsdf : mitsuba_parser.bsdfs) {
+		if (m_bsdf.texture != "") {
+			const std::string texture_path = root + m_bsdf.texture;
+			auto it = texture_ids.find(texture_path);
+			if (it == texture_ids.end()) {
+				textures.push_back(texture_path);
+				it = texture_ids.emplace(texture_path, (int)textures.size() - 1).first;
+			}
+			materials[i].texture_id = it->second;
+		} else {
+			materials[i].texture_id = -1;
+		}
+		Material& mat = materials[i];
+		make_default_principled(mat);
+		mat.albedo = m_bsdf.albedo;
+		mat.roughness = m_bsdf.roughness;
+		mat.emissive_factor = m_bsdf.emissive_factor;
+		const std::string& type = m_bsdf.type;
+		const bool is_dielectric = type == "dielectric" || type == "roughdielectric" || type == "thindielectric";
+		const bool is_plastic = type == "plastic" || type == "roughplastic";
+		// Assume Principled for other materials for now
+		if (type == "diffuse" || type == "roughdiffuse") {
+			bsdf_types |= BSDF_TYPE_DIFFUSE;
+			mat.bsdf_type = BSDF_TYPE_DIFFUSE;
+			mat.bsdf_props = BSDF_FLAG_DIFFUSE_REFLECTION;
+		} else if (is_dielectric || is_plastic) {
+			bsdf_types |= BSDF_TYPE_PRINCIPLED;
+			mat.bsdf_type = BSDF_TYPE_PRINCIPLED;
+			// Mitsuba defaults int_ior to ~1.5 (bk7 / polypropylene) when omitted
+			mat.ior = m_bsdf.ior != 1.0f ? m_bsdf.ior : 1.5f;
+			if (mat.roughness < 1.0) {
+				mat.bsdf_props |= BSDF_FLAG_DIFFUSE_REFLECTION;
+			}
+			if (mat.ior != 1.0) {
+				mat.bsdf_props |= BSDF_FLAG_TRANSMISSION;
+			}
+			if (mat.roughness > 0.08) {
+				mat.bsdf_props |= BSDF_FLAG_GLOSSY;
+			} else {
+				mat.bsdf_props |= BSDF_FLAG_SPECULAR;
+			}
+			if (is_dielectric) {
+				mat.spec_trans = 1.0;
+				mat.metallic = 0.0;
+			}
+			if (is_plastic) {
+				// Mitsuba plastic = diffuse base + dielectric coat: a non-metallic, non-transmissive
+				// principled lobe with the coat's IOR (the diffuse part comes from albedo/texture)
+				mat.metallic = 0.0;
+				mat.spec_trans = 0.0;
+				mat.thin = 0;
+				mat.bsdf_props &= ~uint32_t(BSDF_FLAG_TRANSMISSION);
+				mat.bsdf_props |= BSDF_FLAG_DIFFUSE_REFLECTION;
+			}
+
+		} else if (type == "conductor" || type == "roughconductor") {
+			bsdf_types |= BSDF_TYPE_CONDUCTOR;
+			mat.bsdf_type = BSDF_TYPE_CONDUCTOR;
+			reflectance_to_conductor_eta_k(m_bsdf.albedo, mat.albedo, mat.k);
+			mat.bsdf_props = BSDF_FLAG_REFLECTION;
+			if (mat.roughness > 0.08) {
+				mat.bsdf_props |= BSDF_FLAG_GLOSSY;
+			} else {
+				mat.bsdf_props |= BSDF_FLAG_SPECULAR;
+			}
+		} else if (type == "glass") {
+			bsdf_types |= BSDF_TYPE_GLASS;
+			mat.bsdf_type = BSDF_TYPE_GLASS;
+			mat.bsdf_props = BSDF_FLAG_SPECULAR_TRANSMISSION;
+			mat.ior = m_bsdf.ior;
+		} else {
+			LUMEN_WARN("Mitsuba: unsupported BSDF type '{}' ({}), treating as diffuse", type, m_bsdf.name);
+			bsdf_types |= BSDF_TYPE_DIFFUSE;
+			mat.bsdf_type = BSDF_TYPE_DIFFUSE;
+			mat.bsdf_props = BSDF_FLAG_DIFFUSE_REFLECTION;
+		}
+		i++;
+	}
+	compute_scene_dimensions();
+	// Light
+	i = 0;
+	lights.resize(mitsuba_parser.lights.size());
+	for (auto& light : mitsuba_parser.lights) {
+		lights[i].L = light.L;
+		if (light.type == "directional") {
+			lights[i].pos = light.from;
+			lights[i].to = light.to;
+			lights[i].light_flags = LIGHT_DIRECTIONAL;
+			// Is delta
+			lights[i].light_flags |= 1 << 5;
+		}
+		i++;
+	}
 }
 
 void LumenScene::add_default_texture() {
@@ -762,9 +988,7 @@ void LumenScene::compute_scene_dimensions() {
 void LumenScene::destroy() {
 	std::vector<vk::Buffer*> buffer_list = {index_buffer, vertex_buffer, compact_vertices_buffer, materials_buffer,
 											prim_lookup_buffer};
-	if (gpu_lights.size()) {
-		buffer_list.push_back(mesh_lights_buffer);
-	}
+	buffer_list.push_back(mesh_lights_buffer);  // always created (dummy entry when there are no lights)
 	for (vk::Buffer* b : buffer_list) {
 		prm::remove(b);
 	}

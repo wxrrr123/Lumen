@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<scene version="0.5.0" >
+	<integrator type="path" ><integer name="maxDepth" value="10" /></integrator>
+	<sensor type="perspective" >
+		<float name="fov" value="40" />
+		<transform name="toWorld" ><matrix value="1 0 0 0  0 0 -1 0.5  0 1 0 0  0 0 0 1"/></transform>
+		<film type="ldrfilm" ><integer name="width" value="256" /><integer name="height" value="256" /></film>
+	</sensor>
+	<!-- floor: albedo 0.5, facing +y -->
+	<shape type="rectangle" >
+		<transform name="toWorld" ><matrix value="100 0 0 0  0 0 100 0  0 -100 0 0  0 0 0 1"/></transform>
+		<bsdf type="diffuse" ><rgb name="reflectance" value="0.5, 0.5, 0.5"/></bsdf>
+	</shape>
+	<!-- huge emitter at y=1 facing -y, radiance 1, black bsdf -->
+	<shape type="rectangle" >
+		<transform name="toWorld" ><matrix value="100 0 0 0  0 0 -100 1  0 100 0 0  0 0 0 1"/></transform>
+		<bsdf type="diffuse" ><rgb name="reflectance" value="0, 0, 0"/></bsdf>
+		<emitter type="area" ><rgb name="radiance" value="1, 1, 1"/></emitter>
+	</shape>
+</scene>

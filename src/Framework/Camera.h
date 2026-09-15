@@ -84,24 +84,24 @@ class PerspectiveCamera : public Camera {
 		rotation = rot;
 	}
 
+	// cam_matrix is camera-to-world in Lumen's convention (+x right, +y up, camera looks along -z)
 	explicit PerspectiveCamera(float fov, const glm::mat4 cam_matrix, float cam_near, float cam_far, float aspect_ratio)
 		: Camera(cam_near, cam_far), fov(fov), aspect_ratio(aspect_ratio) {
 		left = right = top = bot = -1;
 		this->make_projection_matrix(true);
 		camera = cam_matrix;
 		view = glm::inverse(cam_matrix);
-		glm::vec3 scale;
-		glm::quat q;
-		glm::vec3 translation;
-		glm::vec3 skew;
-		glm::vec4 perspective;
-		glm::decompose(view, scale, q, translation, skew, perspective);
-		glm::vec3 rot{};
-		glm::extractEulerAngleXYZ(glm::toMat4(q), rot.x, rot.y, rot.z);
-		rot *= 180. / glm::pi<float>();
-		rotation = rot;
-		glm::vec3 pos = glm::vec3({cam_matrix[0][3], cam_matrix[1][3], cam_matrix[2][3]});
-		this->set_position(pos);
+		// update_view_matrix() rebuilds the view as T(position) * Ry * Rx * Rz, so extract
+		// the Euler angles in exactly that order from the (scale-free) rotation part.
+		glm::mat4 rot = cam_matrix;
+		for (int c = 0; c < 3; c++) {
+			rot[c] = glm::vec4(glm::normalize(glm::vec3(rot[c])), 0.0f);
+		}
+		rot[3] = glm::vec4(0, 0, 0, 1);
+		float rot_y, rot_x, rot_z;
+		glm::extractEulerAngleYXZ(rot, rot_y, rot_x, rot_z);
+		rotation = glm::degrees(glm::vec3(rot_x, rot_y, rot_z));
+		this->set_position(glm::vec3(cam_matrix[3]));
 	}
 
 	float fov{}, aspect_ratio{};
