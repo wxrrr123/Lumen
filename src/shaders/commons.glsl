@@ -133,8 +133,9 @@ TriangleRecord sample_triangle(PrimMeshInfo pinfo, vec2 rands, uint triangle_idx
 	uv = vec2(1 - sqrt(rands.x), rands.y * sqrt(rands.x));
 	const vec3 barycentrics = vec3(1.0 - uv.x - uv.y, uv.x, uv.y);
 
-	const vec4 etmp0 = world_matrix * vec4(v1 - v0, 1.0);
-	const vec4 etmp1 = world_matrix * vec4(v2 - v0, 1.0);
+	// Edges are directions: w = 0 so the world translation is not added to them
+	const vec4 etmp0 = world_matrix * vec4(v1 - v0, 0.0);
+	const vec4 etmp1 = world_matrix * vec4(v2 - v0, 0.0);
 	const vec3 pos = v0 * barycentrics.x + v1 * barycentrics.y + v2 * barycentrics.z;
 	const vec3 nrm = normalize(n0 * barycentrics.x + n1 * barycentrics.y + n2 * barycentrics.z);
 	const vec4 world_pos = world_matrix * vec4(pos, 1.0);
@@ -142,7 +143,7 @@ TriangleRecord sample_triangle(PrimMeshInfo pinfo, vec2 rands, uint triangle_idx
 	const vec3 e1 = vec3(v1 - v0);
 	// LOG_CLICKED("%v3f\n", v2);
 	// LOG_CLICKED("%v3i\n", ind);
-	result.n_s = normalize(vec3(inv_tr_mat * vec4(nrm, 1.0)));
+	result.n_s = normalize(vec3(inv_tr_mat * vec4(nrm, 0.0)));
 	result.triangle_pdf = 2. / length((cross(vec3(etmp0), vec3(etmp1))));
 	result.pos = vec3(world_pos);
 	return result;
@@ -186,6 +187,35 @@ TriangleRecord sample_area_light(const vec4 rands, const int num_lights, const L
 	return sample_triangle(pinfo, rands.zw, triangle_idx, light.world_matrix, uv);
 }
 
+TriangleRecord sample_area_light_with_idx(const vec4 rands, const Light light, const uint triangle_idx,
+										  out uint material_idx, out vec2 uv) {
+	PrimMeshInfo pinfo = prim_infos.d[light.prim_mesh_idx];
+	material_idx = pinfo.material_index;
+	return sample_triangle(pinfo, rands.zw, triangle_idx, light.world_matrix, uv);
+}
+
+// Pick a light with probability proportional to its triangle count (delta lights count as one),
+// so that the overall pick pdf is 1 / light_triangle_count as assumed by the integrators.
+void pick_light_triangle(const float u, const int num_lights, out uint light_idx, out uint triangle_idx) {
+	uint total = 0;
+	for (int i = 0; i < num_lights; i++) {
+		total += is_light_delta(lights[i].light_flags) ? 1 : max(lights[i].num_triangles, 1);
+	}
+	uint target = min(uint(u * float(total)), total - 1);
+	uint acc = 0;
+	light_idx = uint(num_lights - 1);
+	triangle_idx = 0;
+	for (int i = 0; i < num_lights; i++) {
+		const uint cnt = is_light_delta(lights[i].light_flags) ? 1 : max(lights[i].num_triangles, 1);
+		if (target < acc + cnt) {
+			light_idx = uint(i);
+			triangle_idx = target - acc;
+			return;
+		}
+		acc += cnt;
+	}
+}
+
 TriangleRecord sample_area_light_with_idx(const vec4 rands, const int num_lights, const Light light,
 										  const uint triangle_idx, out uint material_idx) {
 	PrimMeshInfo pinfo = prim_infos.d[light.prim_mesh_idx];
@@ -224,7 +254,8 @@ vec3 uniform_sample_cone(vec2 uv, float cos_max) {
 vec3 sample_light_Li(const vec4 rands_pos, const vec3 p, const int num_lights, out float pdf_pos_w, out vec3 wi,
 					 out float wi_len, out float pdf_pos_a, out float cos_from_light, out LightRecord light_record,
 					 out vec3 n, out vec3 pos, out float pdf_pos_dir_w) {
-	light_record.light_idx = uint(rands_pos.x * num_lights);
+	uint picked_triangle_idx;
+	pick_light_triangle(rands_pos.x, num_lights, light_record.light_idx, picked_triangle_idx);
 	Light light = lights[light_record.light_idx];
 	uint light_type = get_light_type(light.light_flags);
 	vec3 L = vec3(0);
@@ -238,8 +269,9 @@ vec3 sample_light_Li(const vec4 rands_pos, const vec3 p, const int num_lights, o
 	switch (light_type) {
 		case LIGHT_AREA: {
 			uint material_idx;
+			light_record.triangle_idx = picked_triangle_idx;
 			TriangleRecord record =
-				sample_area_light(rands_pos, light, material_idx, light_record.triangle_idx, light_record.bary);
+				sample_area_light_with_idx(rands_pos, light, picked_triangle_idx, material_idx, light_record.bary);
 			Material light_mat = load_material(material_idx, light_record.bary);
 			wi = record.pos - p;
 			float wi_len_sqr = dot(wi, wi);
@@ -335,7 +367,9 @@ vec3 sample_light_Li(const vec4 rands_pos, const vec3 p, const int num_lights, o
 vec3 sample_light_Le(vec4 rands_pos, vec2 rands_dir, const int num_lights, const int total_light,
 					 out float cos_from_light, out LightRecord light_record, out vec3 pos, out vec3 wi, out vec3 n,
 					 out float pdf_pos_a, out float pdf_dir_w, out float phi, out TriangleRecord record) {
-	uint light_idx = uint(rands_pos.x * num_lights);
+	uint light_idx;
+	uint picked_triangle_idx;
+	pick_light_triangle(rands_pos.x, num_lights, light_idx, picked_triangle_idx);
 	Light light = lights[light_idx];
 	vec3 L = vec3(0);
 	uint light_type = get_light_type(light.light_flags);
@@ -349,7 +383,8 @@ vec3 sample_light_Le(vec4 rands_pos, vec2 rands_dir, const int num_lights, const
 		case LIGHT_AREA: {
 			uint material_idx;
 			uint triangle_idx;
-			record = sample_area_light(rands_pos, light, material_idx, light_record.triangle_idx, light_record.bary);
+			light_record.triangle_idx = picked_triangle_idx;
+			record = sample_area_light_with_idx(rands_pos, light, picked_triangle_idx, material_idx, light_record.bary);
 			Material light_mat = load_material(material_idx, light_record.bary);
 			pos = record.pos;
 			wi = sample_hemisphere(rands_dir, record.n_s, phi);
