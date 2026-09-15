@@ -211,7 +211,8 @@ void RayTracer::render(uint32_t i) {
 }
 
 void RayTracer::render_debug_utils() {
-	if (write_exr) {
+	if (write_exr || Window::is_headless()) {
+		// Headless keeps the CPU copy current so save_output() can write the final frame
 		vk::render_graph()->current_pass().copy(integrator->output_tex, output_img_buffer_cpu);
 	} else if (capture_ref_img) {
 		vk::render_graph()->current_pass().copy(integrator->output_tex, reference_tex);
@@ -484,10 +485,10 @@ float RayTracer::draw_frame() {
 	auto now = clock();
 	auto diff = ((float)now - start);
 
+	// Per-frame EXR dump (toggle with F10; off by default)
 	if (write_exr && (integrator->frame_num % 5 == 0 || integrator->frame_num < 10) && integrator->frame_num < 500) {
-		// write_exr = false;
 		vkDeviceWaitIdle(vk::context().device);
-		std::string filename = "output/restirpt_small_buf_output/out_" + std::to_string(integrator->frame_num) + ".exr";
+		std::string filename = "output/frames/out_" + std::to_string(integrator->frame_num) + ".exr";
 		ImageUtils::save_exr((float*)vk::map_buffer(output_img_buffer_cpu), Window::width(), Window::height(),
 							 filename.c_str());
 		vk::unmap_buffer(output_img_buffer_cpu);
@@ -517,9 +518,8 @@ void RayTracer::parse_args(int argc, char* argv[]) {
 	}
 }
 void RayTracer::save_output(const std::string& path) {
-	// render_debug_utils() copies output_tex -> output_img_buffer_cpu every frame
-	// (write_exr defaults to true), so the CPU buffer holds the latest frame once
-	// the device is idle.
+	// render_debug_utils() copies output_tex -> output_img_buffer_cpu every frame in
+	// headless mode, so the CPU buffer holds the latest frame once the device is idle.
 	vkDeviceWaitIdle(vk::context().device);
 	ImageUtils::save_exr((float*)vk::map_buffer(output_img_buffer_cpu), Window::width(), Window::height(),
 						 path.c_str());

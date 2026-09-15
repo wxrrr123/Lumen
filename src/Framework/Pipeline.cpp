@@ -382,8 +382,27 @@ void Pipeline::create_rt_set_layout(VkShaderStageFlags binding_stage_flags) {
 	vk::check(vkCreateDescriptorSetLayout(vk::context().device, &set_create_info, nullptr, &tlas_layout));
 }
 
+uint32_t Pipeline::binding_for_flat_idx(size_t flat_idx) const {
+	size_t acc = 0;
+	size_t count_idx = 0;
+	for (uint32_t b = 0; b < 32; b++) {
+		if (!(binding_mask & (1u << b))) {
+			continue;
+		}
+		const size_t cnt = count_idx < descriptor_counts.size() ? descriptor_counts[count_idx] : 1;
+		count_idx++;
+		acc += cnt;
+		if (flat_idx < acc) {
+			return b;
+		}
+	}
+	return (uint32_t)flat_idx;
+}
+
 void Pipeline::create_set_layout(const std::vector<Shader>& shaders, const std::vector<uint32_t>& descriptor_counts) {
 	std::vector<VkDescriptorSetLayoutBinding> set_bindings;
+	// Keep the per-binding counts around so array bindings can be mapped back from flat resource indices
+	this->descriptor_counts = descriptor_counts;
 
 	if (descriptor_counts.size()) {
 		int idx = 0;

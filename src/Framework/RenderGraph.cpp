@@ -103,13 +103,15 @@ void RenderPass::register_dependencies(vk::Texture* tex, VkImageLayout dst_layou
 }
 
 void RenderPass::transition_resources() {
+	descriptor_infos.resize(pipeline_storage->bound_resources.size());
 	if (rg->settings.shader_inference) {
 		for (auto i = 0; i < pipeline_storage->bound_resources.size(); i++) {
 			auto& bound_resource = pipeline_storage->bound_resources[i];
 			if (!bound_resource.active) {
 				if (bound_resource.tex) {
 					descriptor_infos[i] = vk::get_texture_descriptor(
-						bound_resource.tex, vk::get_image_layout(pipeline_storage->pipeline->descriptor_types[i]));
+						bound_resource.tex,
+						vk::get_image_layout(pipeline_storage->pipeline->descriptor_types[pipeline_storage->pipeline->binding_for_flat_idx(i)]));
 				} else {
 					descriptor_infos[i] = pipeline_storage->bound_resources[i].get_descriptor_info();
 				}
@@ -701,7 +703,7 @@ void RenderPass::run(VkCommandBuffer cmd) {
 	// Push descriptors
 	if (pipeline_storage->bound_resources.size()) {
 		vkCmdPushDescriptorSetWithTemplateKHR(cmd, pipeline_storage->pipeline->update_template,
-											  pipeline_storage->pipeline->pipeline_layout, 0, descriptor_infos);
+											  pipeline_storage->pipeline->pipeline_layout, 0, descriptor_infos.data());
 	}
 	// Push constants
 	if (pipeline_storage->pipeline->push_constant_size) {

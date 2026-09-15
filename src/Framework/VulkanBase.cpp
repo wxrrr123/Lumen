@@ -810,7 +810,10 @@ void cleanup() {
 	vkDestroyQueryPool(context().device, context().query_pool_timestamps[0], nullptr);
 	vkDestroyQueryPool(context().device, context().query_pool_timestamps[1], nullptr);
 	vkDestroyQueryPool(context().device, context().query_pool_timestamps[2], nullptr);
-	vkDestroySwapchainKHR(context().device, context().swapchain, nullptr);
+	if (!Window::is_headless()) {
+		// No surface/swapchain (and possibly no KHR_swapchain entry points) in headless mode
+		vkDestroySwapchainKHR(context().device, context().swapchain, nullptr);
+	}
 	vk::event_pool::cleanup();
 	vkFreeCommandBuffers(context().device, context().cmd_pools[0],
 						 static_cast<uint32_t>(context().command_buffers.size()), context().command_buffers.data());
@@ -823,7 +826,9 @@ void cleanup() {
 	for (auto pool : context().cmd_pools) {
 		vkDestroyCommandPool(context().device, pool, nullptr);
 	}
-	vkDestroySurfaceKHR(context().instance, context().surface, nullptr);
+	if (!Window::is_headless()) {
+		vkDestroySurfaceKHR(context().instance, context().surface, nullptr);
+	}
 	prm::destroy();
 	vmaDestroyAllocator(context().allocator);
 

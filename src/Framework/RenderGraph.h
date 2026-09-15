@@ -191,7 +191,8 @@ class RenderPass {
 	std::unordered_map<VkImage, ImageSyncDescriptor> set_signals_img;
 	std::unordered_map<VkImage, ImageSyncDescriptor> wait_signals_img;
 
-	vk::DescriptorInfo descriptor_infos[32] = {};
+	// One entry per bound resource (array bindings expand to one entry per element)
+	std::vector<vk::DescriptorInfo> descriptor_infos;
 
 	std::vector<std::tuple<vk::Texture*, VkImageLayout, VkImageLayout>> layout_transitions;
 

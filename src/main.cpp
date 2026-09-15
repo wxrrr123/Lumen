@@ -27,6 +27,10 @@ int main(int argc, char* argv[]) {
 			headless_frames = std::atoi(argv[++i]);
 		} else if (arg == "--output" && i + 1 < argc) {
 			headless_output = argv[++i];
+		} else if (arg == "--width" && i + 1 < argc) {
+			width = std::atoi(argv[++i]);
+		} else if (arg == "--height" && i + 1 < argc) {
+			height = std::atoi(argv[++i]);
 		}
 	}
 

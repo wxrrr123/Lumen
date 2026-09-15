@@ -43,6 +43,9 @@ struct Pipeline {
 	std::string name;
 	uint32_t push_constant_size = 0;
 	VkDescriptorType descriptor_types[32] = {};
+	// Bound resources are flat (an array binding contributes one entry per element); map such
+	// a flat index back to the binding number it belongs to.
+	uint32_t binding_for_flat_idx(size_t flat_idx) const;
 	std::vector<uint32_t> descriptor_counts;
 
 	// In the future we may have multiple AS descriptors
