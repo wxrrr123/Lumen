@@ -158,7 +158,8 @@ struct Window {
 	uint32_t viewport_width;
 	uint32_t viewport_height;
 };
-void init(int width, int height, bool fullscreen);
+void init(int width, int height, bool fullscreen, bool headless = false);
+bool is_headless();
 Window* get();
 void update_window_size();
 void poll();

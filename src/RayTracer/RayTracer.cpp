@@ -11,12 +11,24 @@ RayTracer* RayTracer::instance = nullptr;
 bool load_reference = false;
 bool calc_rmse = false;
 
+static double now_ms() {
+	if (Window::is_headless()) {
+		using namespace std::chrono;
+		return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+	}
+	return glfwGetTime() * 1000.0;
+}
+
 RayTracer::RayTracer(bool debug, int argc, char* argv[]) : debug(debug) {
 	instance = this;
 	parse_args(argc, argv);
 }
 
 void RayTracer::init() {
+	gpu_timing_enabled = getenv("LUMEN_LOG_GPU_TIMING") != nullptr;
+	if (const char* marker_env = getenv("LUMEN_PROFILE_FRAME_MARKERS")) {
+		profile_frame_markers = atoi(marker_env) != 0;
+	}
 	// LUMEN_FIXED_SEED: override the wall-clock RNG seed for reproducible A/B comparisons across
 	// separate process runs (e.g. SER variant correctness validation -- see
 	// divergence-study/results-2026-09-02-ser-reorder.md). Off by default (real time, as before).
@@ -83,6 +95,14 @@ void RayTracer::init() {
 	}
 	post_fx.init();
 	init_resources();
+	// Windowed interactive runs keep the existing periodic EXR behavior. Headless runs only
+	// copy the final frame when main() explicitly requests an output, so benchmark frames do
+	// not contain diagnostic copies or synchronous disk writes.
+	write_exr = !Window::is_headless();
+	if (const char* write_exr_env = getenv("LUMEN_WRITE_EXR")) {
+		write_exr = atoi(write_exr_env) != 0;
+	}
+	LUMEN_TRACE("[RUNTIME CHECK] periodic_exr={}", write_exr);
 	LUMEN_TRACE("Memory usage {} MB", vk::get_memory_usage(vk::context().physical_device) * 1e-6);
 }
 
@@ -130,6 +150,12 @@ void RayTracer::init_resources() {
 	reference_tex = prm::get_texture(texture_desc);
 	texture_desc.name = "Target Texture";
 	target_tex = prm::get_texture(texture_desc);
+	if (Window::is_headless()) {
+		headless_output_tex = prm::get_texture({.name = "Headless Display Output",
+												 .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+												 .dimensions = {Window::width(), Window::height(), 1},
+												 .format = vk::display_format()});
+	}
 
 	RTUtilsDesc rt_utils_desc;
 	if (load_reference) {
@@ -170,7 +196,7 @@ void RayTracer::init_resources() {
 void RayTracer::cleanup_resources() {
 	std::vector<vk::Buffer*> buffer_list = {output_img_buffer, output_img_buffer_cpu, residual_buffer,
 											counter_buffer,	   rmse_val_buffer,		  rt_utils_desc_buffer};
-	std::vector<vk::Texture*> tex_list = {reference_tex, target_tex};
+	std::vector<vk::Texture*> tex_list = {reference_tex, target_tex, headless_output_tex};
 	if (load_reference) {
 		buffer_list.push_back(gt_img_buffer);
 	}
@@ -204,18 +230,35 @@ void RayTracer::render(uint32_t i) {
 	} else {
 		input_tex = integrator->output_tex;
 	}
-	post_fx.render(input_tex, vk::swapchain_images()[i]);
+	vk::Texture* display_output =
+		Window::is_headless() ? headless_output_tex : vk::swapchain_images()[i];
+	post_fx.render(input_tex, display_output);
 	render_debug_utils();
 
 	auto cmdbuf = vk::context().command_buffers[i];
 	VkCommandBufferBeginInfo begin_info = vk::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 	vk::check(vkBeginCommandBuffer(cmdbuf, &begin_info));
+	GPUQueryManager::set_frame_id(integrator->frame_num);
+	// Capture-only CPU markers prove the selected frames followed actual rendering
+	// warmup. Shader work and the regular timing path do not enable this option.
+	if (profile_frame_markers) {
+		double elapsed_ms = profile_render_start == std::chrono::steady_clock::time_point{} ? 0.0 :
+			std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - profile_render_start).count();
+		char marker[128];
+		std::snprintf(marker, sizeof(marker), "Profile frame elapsed_ms=%.3f frame=%llu", elapsed_ms,
+			static_cast<unsigned long long>(integrator->frame_num));
+		vk::DebugMarker::begin_region(vk::context().device, cmdbuf, marker, glm::vec4(0.2f, 0.7f, 1.0f, 1.0f));
+	}
 	vk::render_graph()->run(cmdbuf);
+	if (profile_frame_markers) {
+		vk::DebugMarker::end_region(vk::context().device, cmdbuf);
+	}
 	vk::check(vkEndCommandBuffer(cmdbuf));
 }
 
 void RayTracer::render_debug_utils() {
-	if (write_exr) {
+	if (write_exr || capture_output_buffer) {
 		vk::render_graph()->current_pass().copy(integrator->output_tex, output_img_buffer_cpu);
 	} else if (capture_ref_img) {
 		vk::render_graph()->current_pass().copy(integrator->output_tex, reference_tex);
@@ -257,6 +300,7 @@ void RayTracer::render_debug_utils() {
 			.push_constants(&rt_utils_pc)
 			.bind(rt_utils_desc_buffer);
 	}
+	capture_output_buffer = false;
 }
 
 void RayTracer::create_integrator(int integrator_idx) {
@@ -441,44 +485,51 @@ float RayTracer::draw_frame() {
 		start = clock();
 	}
 
-	auto t_begin = glfwGetTime() * 1000;
+	const bool headless = Window::is_headless();
+	auto t_begin = now_ms();
 	bool updated = false;
-	if (resize_if_needed()) {
-		auto t_end = glfwGetTime() * 1000;
+	if (!headless && resize_if_needed()) {
+		auto t_end = now_ms();
 		return float(t_end - t_begin);
 	}
 	uint32_t image_idx = vk::prepare_frame();
 	if (image_idx == UINT32_MAX) {
-		auto t_end = glfwGetTime() * 1000;
+		auto t_end = now_ms();
 		auto t_diff = t_end - t_begin;
 		return (float)t_diff;
 	}
-	ImGui_ImplVulkan_NewFrame();
-	ImGui_ImplGlfw_NewFrame();
-	ImGui::NewFrame();
+	if (!headless) {
+		ImGui_ImplVulkan_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
 
-	integrator->updated |= updated;
-	if (show_ui) {
-		ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Once);
-		ImGui::Begin("Debug (F1 to hide)", &show_ui);
-		bool gui_updated = gui();
-		gui_updated |= integrator->gui();
-		gui_updated |= post_fx.gui();
-		static bool show_imgui_demo = false;
-		if (ImGui::Button("Show ImGui Demo")) {
-			show_imgui_demo = !show_imgui_demo;
+		integrator->updated |= updated;
+		if (show_ui) {
+			ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Once);
+			ImGui::Begin("Debug (F1 to hide)", &show_ui);
+			bool gui_updated = gui();
+			gui_updated |= integrator->gui();
+			gui_updated |= post_fx.gui();
+			static bool show_imgui_demo = false;
+			if (ImGui::Button("Show ImGui Demo")) {
+				show_imgui_demo = !show_imgui_demo;
+			}
+			if (show_imgui_demo) {
+				ImGui::ShowDemoWindow(&show_imgui_demo);
+			}
+			ImGui::End();
+			integrator->updated |= gui_updated;
 		}
-		if (show_imgui_demo) {
-			ImGui::ShowDemoWindow(&show_imgui_demo);
-		}
-		ImGui::End();
-		integrator->updated |= gui_updated;
 	}
 
 	render(image_idx);
 	VkResult result = vk::submit_frame(image_idx);
+	if (profile_frame_markers && profile_render_start == std::chrono::steady_clock::time_point{}) {
+		// Start after the first render submission, excluding scene/pipeline setup.
+		profile_render_start = std::chrono::steady_clock::now();
+	}
 	vk::render_graph()->reset();
-	if (result != VK_SUCCESS) {
+	if (!headless && result != VK_SUCCESS) {
 		resize_if_needed();
 	}
 
@@ -496,26 +547,25 @@ float RayTracer::draw_frame() {
 	bool time_limit = (abs(diff / CLOCKS_PER_SEC - 5)) < 0.1;
 	calc_rmse = time_limit;
 
-	// SER cost-key reorder experiment: per-pass GPU timestamp readout (GPUQueryManager is already
-	// per-render-graph-pass and immune to vsync/present pacing -- see
-	// divergence-study/results-2026-09-02-ser-reorder.md). Gated by env var, same 5s cadence as
-	// the RMSE log above, so it doesn't spam every frame.
-	if (time_limit && getenv("LUMEN_LOG_GPU_TIMING")) {
+	// SER cost-key reorder experiment: report every completed timestamp set. Query results lag
+	// submission because the renderer has three frames in flight, so use the frame id saved with
+	// the query pool rather than the currently submitted integrator frame number.
+	if (gpu_timing_enabled) {
 		auto& query_results = GPUQueryManager::get();
-		if (query_results.size > 0) {
+		if (query_results.size > 0 && query_results.frame_id != UINT64_MAX) {
 			uint64_t gpu_start = query_results.timestamps[0];
 			uint64_t gpu_end = query_results.timestamps[query_results.size - 1];
-			LUMEN_TRACE("[SER] frame {} GPU full-frame time: {:.4f} ms", integrator->frame_num,
+			LUMEN_TRACE("[SER] frame {} GPU full-frame time: {:.4f} ms", query_results.frame_id,
 						(gpu_end - gpu_start) * 1e-6);
-			// Prefix match, not exact: the render graph suffixes active macros onto the pass name
-			// (e.g. "GRIS - Retrace Reservoirs(ENABLE_COST_REORDER)"), so an exact match only ever
-			// hits variant A (no macros enabled -> no suffix).
 			bool found_retrace = false;
 			for (size_t i = 0; i < query_results.size; i += 2) {
+				double diff_ms = (query_results.timestamps[i + 1] - query_results.timestamps[i]) * 1e-6;
+				LUMEN_TRACE("[SER-PASS] frame {} GPU '{}' time: {:.4f} ms", query_results.frame_id,
+							query_results.names[i >> 1], diff_ms);
+				// Prefix match, not exact: active shader macros are appended to the pass name.
 				if (query_results.names[i >> 1].rfind("GRIS - Retrace Reservoirs", 0) == 0) {
 					found_retrace = true;
-					double diff_ms = (query_results.timestamps[i + 1] - query_results.timestamps[i]) * 1e-6;
-					LUMEN_TRACE("[SER] frame {} GPU 'GRIS - Retrace Reservoirs' time: {:.4f} ms", integrator->frame_num,
+					LUMEN_TRACE("[SER] frame {} GPU 'GRIS - Retrace Reservoirs' time: {:.4f} ms", query_results.frame_id,
 								diff_ms);
 				}
 			}
@@ -534,7 +584,7 @@ float RayTracer::draw_frame() {
 		LUMEN_TRACE("RMSE {}", rmse * 1e6);
 		start = now;
 	}
-	auto t_end = glfwGetTime() * 1000;
+	auto t_end = now_ms();
 	auto t_diff = t_end - t_begin;
 	cnt++;
 	return (float)t_diff;
@@ -549,6 +599,23 @@ void RayTracer::parse_args(int argc, char* argv[]) {
 		}
 	}
 }
+
+void RayTracer::save_output(const std::string& path) {
+	vkDeviceWaitIdle(vk::context().device);
+	ImageUtils::save_exr((float*)vk::map_buffer(output_img_buffer_cpu), Window::width(), Window::height(),
+						 path.c_str());
+	vk::unmap_buffer(output_img_buffer_cpu);
+}
+
+void RayTracer::set_gpu_timing_enabled(bool enabled) {
+	gpu_timing_enabled = enabled;
+	if (enabled) {
+		LUMEN_TRACE("[MEASUREMENT] GPU timing starts at frame {}", integrator->frame_num);
+	}
+}
+
+void RayTracer::capture_next_output() { capture_output_buffer = true; }
+
 void RayTracer::destroy_accel() {
 	if (tlas.accel) {
 		prm::remove(tlas.buffer);
@@ -571,7 +638,9 @@ void RayTracer::cleanup() {
 		post_fx.destroy();
 		scene.destroy();
 		destroy_accel();
-		vk::destroy_imgui();
+		if (!Window::is_headless()) {
+			vk::destroy_imgui();
+		}
 		vk::cleanup();
 	}
 }

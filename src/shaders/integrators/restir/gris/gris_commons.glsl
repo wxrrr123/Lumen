@@ -9,11 +9,50 @@ layout(buffer_reference, scalar, buffer_reference_align = 4) buffer PrefixContri
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Transformation { mat4 m[]; };
 
 GrisReservoir in_reservoirs = GrisReservoir(scene_desc.gris_reservoir_addr);
+uint pixel_idx = (gl_LaunchIDEXT.x * gl_LaunchSizeEXT.y + gl_LaunchIDEXT.y);
+
+#ifdef PROFILE_NUMERIC_STABILITY
+// Stages: 1 Generate, 2 Temporal, 3 Retrace, 4 Validate, 5 Spatial.
+// Common kinds: 1 W, 2 w_sum, 3 target_pdf, 4 stored scalar contribution,
+// 5 RGB contribution, 6 jacobian, 7 sample color, 8 previous accumulation,
+// 9 output accumulation. Generate additionally uses 11 pre-direct color,
+// 12 direct lighting, 13 miss, 14 primary emissive, 15 NEE Li,
+// 16 NEE contribution, and 17 later-bounce emissive contribution.
+layout(buffer_reference, scalar, buffer_reference_align = 4) coherent buffer NumericDiagnosticBuffer { uint d[]; };
+NumericDiagnosticBuffer numeric_diagnostic = NumericDiagnosticBuffer(scene_desc.gris_numeric_diagnostic_addr);
+
+bool numeric_nonfinite(float value) { return isnan(value) || isinf(value); }
+bool numeric_nonfinite(vec3 value) { return any(isnan(value)) || any(isinf(value)); }
+
+void report_numeric_scalar(uint stage, uint kind, float value) {
+	if (!numeric_nonfinite(value)) return;
+	atomicAdd(numeric_diagnostic.d[16 + stage], 1u);
+	if (atomicCompSwap(numeric_diagnostic.d[0], 0u, 1u) == 0u) {
+		numeric_diagnostic.d[1] = pc.frame_num;
+		numeric_diagnostic.d[2] = stage;
+		numeric_diagnostic.d[3] = pixel_idx;
+		numeric_diagnostic.d[4] = kind;
+		numeric_diagnostic.d[5] = floatBitsToUint(value);
+	}
+}
+
+void report_numeric_vec3(uint stage, uint kind, vec3 value) {
+	if (!numeric_nonfinite(value)) return;
+	float first_value = numeric_nonfinite(value.x) ? value.x : (numeric_nonfinite(value.y) ? value.y : value.z);
+	report_numeric_scalar(stage, kind, first_value);
+}
+#else
+void report_numeric_scalar(uint stage, uint kind, float value) {}
+void report_numeric_vec3(uint stage, uint kind, vec3 value) {}
+#endif
 
 struct FullReservoir {
     Reservoir header;
     GrisData data;
 };
+
+bool has_nonfinite(float value) { return isnan(value) || isinf(value); }
+bool has_nonfinite(vec3 value) { return any(isnan(value)) || any(isinf(value)); }
 
 #define IMPORTANCE_INVALID 0xFFFFFFFF
 #define IMPORTANCE_THRESHOLD -1.0f
@@ -31,8 +70,6 @@ const uint flags = gl_RayFlagsOpaqueEXT;
 const float tmin = 0.001;
 const float tmax = 10000.0;
 #define RR_MIN_DEPTH 3
-uint pixel_idx = (gl_LaunchIDEXT.x * gl_LaunchSizeEXT.y + gl_LaunchIDEXT.y);
-
 #ifdef PROFILE_REPLAY_RAY_COUNT
 // Per-invocation (per-thread) counters for M4: how many real traceRayEXT calls a single
 // retrace_paths()/advance_paths() call actually issues. Zeroed by retrace_paths.rgen before
@@ -238,7 +275,8 @@ vec3 do_nee(inout uvec4 seed, vec3 pos, Material hit_mat, bool side, vec3 n_s, v
 	const float light_pick_pdf = 1. / pc.light_triangle_count;
 	if (visible && pdf_light_w > 0) {
 		float mis_weight = is_light_delta(record.flags) ? 1 : 1 / (1 + light_bsdf_pdf / pdf_light_w);
-		return mis_weight * f_light * abs(cos_x) * Le / (light_pick_pdf * pdf_light_w);
+		vec3 contribution = mis_weight * f_light * abs(cos_x) * Le / (light_pick_pdf * pdf_light_w);
+		return has_nonfinite(contribution) ? vec3(0) : contribution;
 	}
 	return vec3(0);
 }
@@ -296,7 +334,12 @@ bool gbuffer_data_valid(in GBuffer gbuffer) { return gbuffer.primitive_instance_
 bool update_reservoir(inout uvec4 seed, inout FullReservoir r_new, const GrisData data, float target_pdf,
 					  float inv_source_pdf) {
 	float w_i = target_pdf * inv_source_pdf;
-	r_new.header.w_sum += w_i;
+	float new_w_sum = r_new.header.w_sum + w_i;
+	if (has_nonfinite(w_i) || has_nonfinite(new_w_sum)) {
+		init_reservoir(r_new);
+		return false;
+	}
+	r_new.header.w_sum = new_w_sum;
 	if (rand(seed) * r_new.header.w_sum < w_i) {
 		r_new.data = data;
 		r_new.header.target_pdf = target_pdf;
@@ -308,7 +351,7 @@ bool update_reservoir(inout uvec4 seed, inout FullReservoir r_new, const GrisDat
 bool stream_reservoir(inout uvec4 seed, inout FullReservoir r_new, const GrisData data, float target_pdf,
 					  float inv_source_pdf) {
 	r_new.header.M++;
-	if (target_pdf <= 0.0 || isnan(inv_source_pdf) || inv_source_pdf <= 0.0) {
+	if (target_pdf <= 0.0 || has_nonfinite(target_pdf) || inv_source_pdf <= 0.0 || has_nonfinite(inv_source_pdf)) {
 		return false;
 	}
 	return update_reservoir(seed, r_new, data, target_pdf, inv_source_pdf);
@@ -326,11 +369,21 @@ bool combine_reservoir(inout uvec4 seed, inout FullReservoir target_reservoir, c
 
 void calc_reservoir_W(inout FullReservoir r) {
 	float denom = r.header.target_pdf * r.header.M;
+	if (has_nonfinite(denom) || has_nonfinite(r.header.w_sum) || has_nonfinite(r.header.target_pdf)) {
+		init_reservoir(r);
+		return;
+	}
 	r.header.W = denom == 0.0 ? 0.0 : r.header.w_sum / denom;
+	if (has_nonfinite(r.header.W)) init_reservoir(r);
 }
 
 void calc_reservoir_W_with_mis(inout FullReservoir r) { 
-    r.header.W = r.header.target_pdf == 0.0 ? 0.0 : r.header.w_sum / r.header.target_pdf;
+	if (has_nonfinite(r.header.target_pdf) || has_nonfinite(r.header.w_sum)) {
+		init_reservoir(r);
+		return;
+	}
+	r.header.W = r.header.target_pdf == 0.0 ? 0.0 : r.header.w_sum / r.header.target_pdf;
+	if (has_nonfinite(r.header.W)) init_reservoir(r);
 }
 
 float calc_target_pdf(vec3 f) { return luminance(f); }
@@ -584,7 +637,7 @@ bool advance_paths(in HitData dst_gbuffer, in GrisData data, vec3 dst_wi, float 
 							 reservoir_contribution);
 				jacobian = jacobian_num / src_jacobian;
 			}
-			if (isnan(jacobian) || isinf(jacobian) || jacobian == 0) {
+			if (has_nonfinite(jacobian) || has_nonfinite(reservoir_contribution) || jacobian == 0) {
 				jacobian_num = 0;
 				jacobian_out = 0;
 				reservoir_contribution = vec3(0);

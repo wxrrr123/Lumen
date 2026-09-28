@@ -300,6 +300,8 @@ struct Material {
 	uint64_t gris_neighbor_distance_histogram_addr;
 	uint64_t gris_replay_ray_count_addr;
 	uint64_t gris_replay_shadow_ray_count_addr;
+	uint64_t gris_cost_sink_addr;
+	uint64_t gris_numeric_diagnostic_addr;
 
 	// VCM Reservoir
 	uint64_t vcm_reservoir_addr;

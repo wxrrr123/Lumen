@@ -37,6 +37,8 @@ class ReSTIRPT final : public Integrator {
 	// per-pixel layout as reconnection_buffer -- slot 0 unused, slot i+1 = neighbor i.
 	vk::Buffer* gris_replay_ray_count_buffer;
 	vk::Buffer* gris_replay_shadow_ray_count_buffer;
+	vk::Buffer* gris_cost_sink_buffer;
+	vk::Buffer* gris_numeric_diagnostic_buffer;
 	// CPU-side copy of last frame's "accessed (count > 0)" mask, for frame-to-frame access
 	// pattern stability profiling (see profile_neighbor_access). Size mismatch (e.g. after a
 	// resolution change) is treated as "no previous frame" and the comparison is skipped for
@@ -71,6 +73,18 @@ class ReSTIRPT final : public Integrator {
 	// default A -- see divergence-study/results-2026-09-02-ser-reorder.md).
 	bool ser_enable_cost_reorder = false;	// D, C
 	bool ser_enable_reorder_call = false;	// B, C
+	bool profile_retrace_cost_key = false;
+	bool validate_ser_enable_cost_reorder = false;	// D, C
+	bool validate_ser_enable_reorder_call = false;	// B, C
+	bool profile_validate_cost_key = false;
+	bool validate_cost_sink = false;
+	int validate_dummy_words = 0;
+	bool temporal_ser_enable_cost_reorder = false;	// D, C
+	bool temporal_ser_enable_reorder_call = false;	// B, C
+	bool profile_temporal_cost_key = false;
+	bool temporal_cost_sink = false;
+	bool profile_numeric_stability = false;
+	bool profile_cost_accuracy = false;
 	static constexpr float compact_ratio = 1.0f;
 	// Must match NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS in spatial_reuse.rgen
 	static constexpr uint32_t NEIGHBOR_DISTANCE_HISTOGRAM_BUCKETS = 32;

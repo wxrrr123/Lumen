@@ -32,7 +32,10 @@ std::vector<VkFence> _in_flight_fences;
 std::vector<VkFence> _images_in_flight;
 std::vector<VkQueueFamilyProperties> _queue_families;
 std::unique_ptr<lumen::RenderGraph> _rg;
-VkFormat _swapchain_format;
+// This is also the format used by the headless display target. It matches the
+// preferred swapchain format; a windowed run replaces it with the selected
+// surface format when the swapchain is created.
+VkFormat _swapchain_format = VK_FORMAT_B8G8R8A8_SRGB;
 
 std::vector<Texture*> _swapchain_images;
 
@@ -41,16 +44,22 @@ bool _enable_validation_layers;
 VkDescriptorPool _imgui_pool = 0;
 
 static std::vector<const char*> get_req_extensions() {
-	uint32_t glfwExtensionCount = 0;
-	const char** glfwExtensions;
-	glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-
-	std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+	std::vector<const char*> extensions;
+	if (!Window::is_headless()) {
+		uint32_t glfwExtensionCount = 0;
+		const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+		extensions.assign(glfwExtensions, glfwExtensions + glfwExtensionCount);
+	}
 
 	if (_enable_validation_layers) {
 		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 	}
 	return extensions;
+}
+
+static bool queues_complete(const QueueFamilyIndices& indices) {
+	bool base = indices.gfx_family.has_value() && indices.compute_family.has_value();
+	return Window::is_headless() ? base : (base && indices.present_family.has_value());
 }
 
 static QueueFamilyIndices find_queue_families(VkPhysicalDevice device) {
@@ -70,14 +79,15 @@ static QueueFamilyIndices find_queue_families(VkPhysicalDevice device) {
 			indices.compute_family = i;
 		}
 
-		VkBool32 present_support = false;
-		vkGetPhysicalDeviceSurfaceSupportKHR(device, i, context().surface, &present_support);
-
-		if (present_support) {
-			indices.present_family = i;
+		if (!Window::is_headless()) {
+			VkBool32 present_support = false;
+			vkGetPhysicalDeviceSurfaceSupportKHR(device, i, context().surface, &present_support);
+			if (present_support) {
+				indices.present_family = i;
+			}
 		}
 
-		if (indices.is_complete()) {
+		if (queues_complete(indices)) {
 			break;
 		}
 
@@ -253,16 +263,18 @@ static void pick_physical_device() {
 			return required_extensions.empty();
 		}(device);
 
-		// Query swaphcain support
+		// A headless run has no surface or swapchain to query.
 		bool swapchain_adequate = false;
-		if (extensions_supported) {
+		if (Window::is_headless()) {
+			swapchain_adequate = true;
+		} else if (extensions_supported) {
 			SwapChainSupportDetails swapchain_support = query_swapchain_support(device);
 			// If we have a format and present mode, it's adequate
 			swapchain_adequate = !swapchain_support.formats.empty() && !swapchain_support.present_modes.empty();
 		}
 		// If we have the appropiate queue families, extensions and adequate
 		// swapchain, return true
-		return indices.is_complete() && extensions_supported && swapchain_adequate;
+		return queues_complete(indices) && extensions_supported && swapchain_adequate;
 	};
 	for (const auto& device : devices) {
 		if (is_suitable(device)) {
@@ -287,12 +299,12 @@ static void create_logical_device() {
 
 	std::vector<VkDeviceQueueCreateInfo> queue_CIs;
 	std::unordered_set<uint32_t> unique_queue_families = {context().queue_indices.gfx_family.value(),
-														  context().queue_indices.present_family.value(),
 														  context().queue_indices.compute_family.value()};
+	if (context().queue_indices.present_family.has_value()) {
+		unique_queue_families.insert(context().queue_indices.present_family.value());
+	}
 
-	context().queues.resize(context().queue_indices.gfx_family.has_value() +
-							context().queue_indices.present_family.has_value() +
-							context().queue_indices.compute_family.has_value());
+	context().queues.resize(3);
 	float queue_priority = 1.0f;
 	for (uint32_t queue_family_idx : unique_queue_families) {
 		VkDeviceQueueCreateInfo queue_CI{};
@@ -397,8 +409,10 @@ static void create_logical_device() {
 					 &context().queues[(int)QueueType::GFX]);
 	vkGetDeviceQueue(context().device, context().queue_indices.compute_family.value(), 0,
 					 &context().queues[(int)QueueType::COMPUTE]);
-	vkGetDeviceQueue(context().device, context().queue_indices.present_family.value(), 0,
-					 &context().queues[(int)QueueType::PRESENT]);
+	if (context().queue_indices.present_family.has_value()) {
+		vkGetDeviceQueue(context().device, context().queue_indices.present_family.value(), 0,
+						 &context().queues[(int)QueueType::PRESENT]);
+	}
 }
 
 static void create_swapchain(VkSwapchainKHR old_swapchain = VK_NULL_HANDLE) {
@@ -517,7 +531,8 @@ static void create_command_pools() {
 }
 
 static void create_command_buffers() {
-	context().command_buffers.resize(_swapchain_images.size());
+	size_t command_buffer_cnt = Window::is_headless() ? MAX_FRAMES_IN_FLIGHT : _swapchain_images.size();
+	context().command_buffers.resize(command_buffer_cnt);
 	// TODO: Factor
 	// 0 is for the main thread
 	VkCommandBufferAllocateInfo alloc_info = command_buffer_allocate_info(
@@ -635,16 +650,22 @@ static void resolve_optional_device_extensions();
 void init(bool validation_layers) {
 	_enable_validation_layers = validation_layers;
 	create_instance();
-	create_surface();
+	if (!Window::is_headless()) {
+		create_surface();
+	}
 	pick_physical_device();
 	resolve_optional_device_extensions();
 	create_logical_device();
 	create_allocator();
-	create_swapchain();
+	if (!Window::is_headless()) {
+		create_swapchain();
+	}
 	create_command_pools();
 	create_command_buffers();
 	create_sync_primitives();
-	init_imgui();
+	if (!Window::is_headless()) {
+		init_imgui();
+	}
 	context().query_pool_timestamps[0] = create_query_pool(VK_QUERY_TYPE_TIMESTAMP, 4096);
 	context().query_pool_timestamps[1] = create_query_pool(VK_QUERY_TYPE_TIMESTAMP, 4096);
 	context().query_pool_timestamps[2] = create_query_pool(VK_QUERY_TYPE_TIMESTAMP, 4096);
@@ -775,8 +796,16 @@ static void resolve_optional_device_extensions() {
 
 std::vector<Texture*>& swapchain_images() { return _swapchain_images; }
 
+VkFormat display_format() { return _swapchain_format; }
+
 uint32_t prepare_frame() {
 	check(vkWaitForFences(context().device, 1, &_in_flight_fences[current_frame], VK_TRUE, ~0ull), "Timeout");
+	if (Window::is_headless()) {
+		vkResetFences(context().device, 1, &_in_flight_fences[current_frame]);
+		check(vkResetCommandBuffer(context().command_buffers[current_frame], 0));
+		GPUQueryManager::collect(uint32_t(current_frame));
+		return uint32_t(current_frame);
+	}
 
 	uint32_t image_idx;
 	VkResult result = vkAcquireNextImageKHR(context().device, context().swapchain, UINT64_MAX,
@@ -796,6 +825,15 @@ uint32_t prepare_frame() {
 }
 
 VkResult submit_frame(uint32_t image_idx) {
+	if (Window::is_headless()) {
+		VkSubmitInfo submit_info = vk::submit_info();
+		submit_info.commandBufferCount = 1;
+		submit_info.pCommandBuffers = &context().command_buffers[image_idx];
+		check(vkQueueSubmit(context().queues[(int)QueueType::GFX], 1, &submit_info, _in_flight_fences[current_frame]),
+			  "Failed to submit command buffer");
+		current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+		return VK_SUCCESS;
+	}
 	VkSubmitInfo submit_info = vk::submit_info();
 	VkSemaphore wait_semaphores[] = {_image_available_sem[current_frame]};
 	VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
@@ -847,7 +885,9 @@ void cleanup() {
 	vkDestroyQueryPool(context().device, context().query_pool_timestamps[0], nullptr);
 	vkDestroyQueryPool(context().device, context().query_pool_timestamps[1], nullptr);
 	vkDestroyQueryPool(context().device, context().query_pool_timestamps[2], nullptr);
-	vkDestroySwapchainKHR(context().device, context().swapchain, nullptr);
+	if (!Window::is_headless()) {
+		vkDestroySwapchainKHR(context().device, context().swapchain, nullptr);
+	}
 	vk::event_pool::cleanup();
 	vkFreeCommandBuffers(context().device, context().cmd_pools[0],
 						 static_cast<uint32_t>(context().command_buffers.size()), context().command_buffers.data());
@@ -860,7 +900,9 @@ void cleanup() {
 	for (auto pool : context().cmd_pools) {
 		vkDestroyCommandPool(context().device, pool, nullptr);
 	}
-	vkDestroySurfaceKHR(context().instance, context().surface, nullptr);
+	if (!Window::is_headless()) {
+		vkDestroySurfaceKHR(context().instance, context().surface, nullptr);
+	}
 	prm::destroy();
 	vmaDestroyAllocator(context().allocator);
 

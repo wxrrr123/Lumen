@@ -56,6 +56,9 @@ ReplayShadowRayCountBuffer replay_shadow_ray_count = ReplayShadowRayCountBuffer(
 void main() {
 	GBuffer gbuffer = curr_gbuffers[pixel_idx];
 	if (!gbuffer_data_valid(gbuffer)) {
+#ifdef PROFILE_RETRACE_COST_KEY
+		debug_vis.d[pixel_idx] = 0;
+#endif
 		return;
 	}
 	HitData canonical_gbuffer =
@@ -68,8 +71,8 @@ void main() {
 	replay_ray_count.d[(num_spatial_samples + 1) * pixel_idx] = 1;
 #endif
 	Reservoir canonical_header = in_headers[pixel_idx];
-
-#ifdef ENABLE_COST_REORDER
+	uint cost_key = 0;
+#if defined(ENABLE_COST_REORDER) || defined(PROFILE_RETRACE_COST_KEY)
 	// First pass: reproduce the real loop's neighbor selection below EXACTLY (same skip
 	// conditions, same order, same get_neighbor_offset() call sequence), reading only
 	// path_flags -- never calling retrace_paths() -- to derive a cost key before the real work
@@ -80,7 +83,6 @@ void main() {
 	// compact slot invalid), not just the two the handoff sketch named -- any condition the real
 	// loop uses to skip a neighbor for free must also be skipped for free here, or the key is
 	// biased high for exactly the pixels doing the least real work.
-	uint cost_key = 0;
 	{
 		uvec4 cost_seed = seed2;
 		for (uint i = 0; i < num_spatial_samples; i++) {
@@ -130,6 +132,12 @@ void main() {
 			cost_key += min(rc_prefix_length, uint(max(0, remaining_budget)));
 		}
 	}
+#ifdef PROFILE_RETRACE_COST_KEY
+	debug_vis.d[pixel_idx] = cost_key;
+#endif
+#endif
+
+#ifdef ENABLE_COST_REORDER
 #ifdef ENABLE_REORDER_CALL
 	// C: cost-key reorder (the main result).
 	reorderThreadNV(cost_key, COST_KEY_BITS);
@@ -204,6 +212,10 @@ void main() {
 		retrace_paths(canonical_gbuffer, neighbor_data, primary_direction,
                       neighbor_data.rc_partial_jacobian, data.jacobian, data.reservoir_contribution,
                       data.new_jacobian);
+		report_numeric_scalar(3u, 1u, canonical_header.W);
+		report_numeric_vec3(3u, 5u, data.reservoir_contribution);
+		report_numeric_scalar(3u, 6u, data.jacobian);
+		report_numeric_scalar(3u, 10u, data.new_jacobian);
 		reconnection_data[(num_spatial_samples + 1) * pixel_idx + i + 1] = data;
 #ifdef PROFILE_REPLAY_RAY_COUNT
 		replay_ray_count.d[(num_spatial_samples + 1) * pixel_idx + i + 1] = g_replay_ray_count;

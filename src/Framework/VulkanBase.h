@@ -16,6 +16,7 @@ void add_device_extension(const char* name);
 void add_optional_device_extension(const char* name);
 bool is_device_extension_enabled(const char* name);
 std::vector<Texture*>& swapchain_images();
+VkFormat display_format();
 void recreate_swapchain();
 uint32_t prepare_frame();
 VkResult submit_frame(uint32_t image_idx);

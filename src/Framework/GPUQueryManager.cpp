@@ -4,12 +4,13 @@
 namespace GPUQueryManager {
 
 TimestampData _data;
+TimestampData _pool_data[vk::MAX_FRAMES_IN_FLIGHT];
 uint32_t _curr_query_idx = 0;
 uint32_t _curr_pool_idx = 0;
 
 void begin(VkCommandBuffer cmd, const char* name) {
 	LUMEN_ASSERT(_curr_query_idx < 4096, "Query pool exhausted");
-	_data.names[_curr_query_idx >> 1] = std::string(name);
+	_pool_data[_curr_pool_idx].names[_curr_query_idx >> 1] = std::string(name);
 	vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk::context().query_pool_timestamps[_curr_pool_idx],
 						_curr_query_idx++);
 }
@@ -17,18 +18,28 @@ void end(VkCommandBuffer cmd) {
 	LUMEN_ASSERT(_curr_query_idx < 4096, "Query pool exhausted");
 	vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, vk::context().query_pool_timestamps[_curr_pool_idx],
 						_curr_query_idx++);
+	_pool_data[_curr_pool_idx].size = _curr_query_idx;
 }
 
+void set_frame_id(uint64_t frame_id) { _pool_data[_curr_pool_idx].frame_id = frame_id; }
+
 void collect(uint32_t curr_frame_idx) {
-	_data.size = _curr_query_idx;
+	auto& pool_data = _pool_data[curr_frame_idx];
+	_data.size = pool_data.size;
+	_data.frame_id = pool_data.frame_id;
 	// Note: curr_frame_idx is the index of the command buffer that has finished its execution
-	if (_curr_query_idx > 0) {
+	if (pool_data.size > 0) {
 		vkGetQueryPoolResults(vk::context().device, vk::context().query_pool_timestamps[curr_frame_idx], 0,
-							  _curr_query_idx, sizeof(uint64_t) * _curr_query_idx, _data.timestamps, sizeof(uint64_t),
+							  pool_data.size, sizeof(uint64_t) * pool_data.size, _data.timestamps, sizeof(uint64_t),
 							  VK_QUERY_RESULT_64_BIT);
-		_curr_query_idx = 0;
+		for (size_t i = 0; i < pool_data.size / 2; ++i) {
+			_data.names[i] = pool_data.names[i];
+		}
 	}
 	_curr_pool_idx = curr_frame_idx;
+	_curr_query_idx = 0;
+	pool_data.size = 0;
+	pool_data.frame_id = UINT64_MAX;
 	vkResetQueryPool(vk::context().device, vk::context().query_pool_timestamps[curr_frame_idx], 0, 4096);
 }
 

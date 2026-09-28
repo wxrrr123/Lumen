@@ -8,6 +8,10 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_shader_atomic_float : require
 
+#ifdef ENABLE_TEMPORAL_REORDER_CALL
+#extension GL_NV_shader_invocation_reorder : require
+#endif
+
 #define SCENE_TEX_IDX 13
 #include "gris_commons.glsl"
 PrefixContributions prefix_contributions = PrefixContributions(scene_desc.prefix_contributions_addr);
@@ -22,6 +26,27 @@ layout(binding = 11, scalar) buffer CurrCompactData { GrisData curr_compact_data
 layout(binding = 12, scalar) readonly buffer PrevCompactData { GrisData prev_compact_data[]; };
 uvec4 seed = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed3);
 
+#ifdef PROFILE_TEMPORAL_COST_KEY
+layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer DebugVisBuffer { uint d[]; };
+DebugVisBuffer debug_vis = DebugVisBuffer(scene_desc.debug_vis_addr);
+#endif
+
+#ifdef ENABLE_TEMPORAL_COST_SINK
+layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer TemporalCostSinkBuffer { uint d[]; };
+TemporalCostSinkBuffer temporal_cost_sink = TemporalCostSinkBuffer(scene_desc.gris_cost_sink_addr);
+#endif
+
+#ifdef PROFILE_REPLAY_RAY_COUNT
+layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer ReplayRayCountBuffer { uint d[]; };
+ReplayRayCountBuffer replay_ray_count = ReplayRayCountBuffer(scene_desc.gris_replay_ray_count_addr);
+layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer ReplayShadowRayCountBuffer { uint d[]; };
+ReplayShadowRayCountBuffer replay_shadow_ray_count = ReplayShadowRayCountBuffer(scene_desc.gris_replay_shadow_ray_count_addr);
+#endif
+
+// At depth 8 each replay contributes at most 7 iterations, so the sum fits in 0-14. The final
+// bit count is kept here as a named constant so the measured distribution can be applied directly.
+#define TEMPORAL_COST_KEY_BITS 4
+
 ivec2 get_permuted_coords(inout uvec4 seed, ivec2 coords) {
 	uvec2 rands = uvec2(floatBitsToUint(rand(seed)), floatBitsToUint(rand(seed)));
 	ivec2 offset = ivec2(rands.x & 3, (rands.y >> 2) & 3);
@@ -31,31 +56,97 @@ ivec2 get_permuted_coords(inout uvec4 seed, ivec2 coords) {
 	return new_coords;
 }
 
+uint replay_upper_bound(uint path_flags) {
+	uint rc_type, rc_prefix_length, rc_postfix_length;
+	bool rc_side, is_directional_light;
+	unpack_path_flags(path_flags, rc_type, rc_prefix_length, rc_postfix_length, rc_side, is_directional_light);
+	int remaining_budget = int(pc.max_depth) - int(rc_postfix_length) - 1;
+	return min(rc_prefix_length, uint(max(0, remaining_budget)));
+}
+
 void main() {
+#ifdef PROFILE_REPLAY_RAY_COUNT
+	g_replay_ray_count = 0u;
+	g_replay_shadow_ray_count = 0u;
+	replay_ray_count.d[pixel_idx] = 0u;
+	replay_shadow_ray_count.d[pixel_idx] = 0u;
+#endif
+	// All launch invocations reach one reorder point. Preserve the original distinction where an
+	// invalid current GBuffer returns without changing curr_flags, while later canonical failures
+	// mark the slot invalid after the reorder point.
+	GBuffer cost_gbuffer = curr_gbuffers[pixel_idx];
+	bool current_gbuffer_valid = gbuffer_data_valid(cost_gbuffer);
+	uint cost_canonical_slot = curr_flags[pixel_idx];
+	Reservoir cost_canonical_header = curr_headers[pixel_idx];
+	bool canonical_valid = current_gbuffer_valid && compact_slot_valid(cost_canonical_slot) &&
+		cost_canonical_header.M != 0 && cost_canonical_header.W != 0.0;
+	uint canonical_path_flags = 0;
+	if (canonical_valid) {
+		canonical_path_flags = curr_compact_data[cost_canonical_slot].path_flags;
+		canonical_valid = canonical_path_flags != 0;
+	}
+
+	uint cost_key = 0;
+#if defined(ENABLE_TEMPORAL_COST_REORDER) || defined(PROFILE_TEMPORAL_COST_KEY)
+	if (canonical_valid) {
+		// Use a local RNG copy so cost prediction does not change the jitter/permutation or reservoir
+		// RNG sequence used by the real pass after the reorder point.
+		uvec4 cost_seed = seed;
+		HitData cost_canonical_gbuffer = get_hitdata(cost_gbuffer.barycentrics,
+			cost_gbuffer.primitive_instance_id.y, cost_gbuffer.primitive_instance_id.x);
+		vec4 cost_prev_pos = ubo.prev_view * vec4(cost_canonical_gbuffer.pos, 1);
+		cost_prev_pos /= cost_prev_pos.z;
+		cost_prev_pos = -ubo.prev_projection * cost_prev_pos;
+		vec2 cost_jitter = pc.enable_temporal_jitter == 1 ? rand2(cost_seed) - 0.5 : vec2(0);
+		ivec2 cost_prev_coords = ivec2(0.5 * (1 + cost_prev_pos.xy) * gl_LaunchSizeEXT.xy + cost_jitter);
+		if (pc.permutation_sampling == 1) cost_prev_coords = get_permuted_coords(cost_seed, cost_prev_coords);
+
+		if (!(any(lessThan(cost_prev_coords, ivec2(0))) ||
+			  any(greaterThanEqual(cost_prev_coords, gl_LaunchSizeEXT.xy)))) {
+			const uint cost_prev_idx = cost_prev_coords.x * pc.size_y + cost_prev_coords.y;
+			GBuffer cost_prev_gbuffer = prev_gbuffers[cost_prev_idx];
+			Reservoir cost_prev_header = prev_headers[cost_prev_idx];
+			uint cost_prev_slot = prev_flags[cost_prev_idx];
+			if (gbuffer_data_valid(cost_prev_gbuffer) && cost_prev_header.M > 0 && cost_prev_header.W > 0.0 &&
+				compact_slot_valid(cost_prev_slot)) {
+				uint prev_path_flags = prev_compact_data[cost_prev_slot].path_flags;
+				if (prev_path_flags != 0) {
+					cost_key = replay_upper_bound(prev_path_flags) + replay_upper_bound(canonical_path_flags);
+				}
+			}
+		}
+	}
+#ifdef PROFILE_TEMPORAL_COST_KEY
+	debug_vis.d[pixel_idx] = cost_key;
+#endif
+#endif
+
+#ifdef ENABLE_TEMPORAL_COST_SINK
+	// A/B write zero and C/D write the computed key; every variant performs the same GPU-local store.
+	temporal_cost_sink.d[pixel_idx] = cost_key;
+#endif
+
+#ifdef ENABLE_TEMPORAL_COST_REORDER
+#ifdef ENABLE_TEMPORAL_REORDER_CALL
+	reorderThreadNV(cost_key, TEMPORAL_COST_KEY_BITS);
+#endif
+#elif defined(ENABLE_TEMPORAL_REORDER_CALL)
+	reorderThreadNV(0u, TEMPORAL_COST_KEY_BITS);
+#endif
+
+	if (!current_gbuffer_valid) return;
+	if (!canonical_valid) {
+		curr_flags[pixel_idx] = IMPORTANCE_INVALID;
+		return;
+	}
+
 	FullReservoir reservoir;
 	init_reservoir(reservoir);
 	GBuffer gbuffer = curr_gbuffers[pixel_idx];
-	if (!gbuffer_data_valid(gbuffer)) {
-		return;
-	}
-
 	uint canonical_slot = curr_flags[pixel_idx];
-	if (!compact_slot_valid(canonical_slot)) {
-		curr_flags[pixel_idx] = IMPORTANCE_INVALID;
-		return;
-	}
-
 	FullReservoir canonical_reservoir;
 	canonical_reservoir.header = curr_headers[pixel_idx];
-	if (canonical_reservoir.header.M == 0 || canonical_reservoir.header.W == 0.0) {
-		curr_flags[pixel_idx] = IMPORTANCE_INVALID;
-		return;
-	}
 	canonical_reservoir.data = curr_compact_data[canonical_slot];
-	if (!reservoir_data_valid(canonical_reservoir.data)) {
-		curr_flags[pixel_idx] = IMPORTANCE_INVALID;
-		return;
-	}
 
 	HitData canonical_gbuffer =
 		get_hitdata(gbuffer.barycentrics, gbuffer.primitive_instance_id.y, gbuffer.primitive_instance_id.x);
@@ -129,6 +220,15 @@ void main() {
 		reservoir.data.rc_partial_jacobian = new_jacobian;
 		reservoir.data.reservoir_contribution = calc_target_pdf(curr_reservoir_contribution);
 	}
+	report_numeric_scalar(2u, 1u, reservoir.header.W);
+	report_numeric_scalar(2u, 2u, reservoir.header.w_sum);
+	report_numeric_scalar(2u, 3u, reservoir.header.target_pdf);
+	report_numeric_scalar(2u, 4u, reservoir.data.reservoir_contribution);
+	report_numeric_vec3(2u, 5u, curr_reservoir_contribution);
+#ifdef PROFILE_REPLAY_RAY_COUNT
+	replay_ray_count.d[pixel_idx] = g_replay_ray_count;
+	replay_shadow_ray_count.d[pixel_idx] = g_replay_shadow_ray_count;
+#endif
 
 	curr_headers[pixel_idx] = reservoir.header;
 	curr_compact_data[canonical_slot] = reservoir.data;

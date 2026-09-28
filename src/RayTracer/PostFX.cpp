@@ -166,8 +166,10 @@ void PostFX::render(vk::Texture* input, vk::Texture* output) {
 							.pass_func =
 								[](VkCommandBuffer cmd, const lumen::RenderPass& render_pass) {
 									vkCmdDraw(cmd, 4, 1, 0, 0);
-									ImGui::Render();
-									ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+									if (!Window::is_headless()) {
+										ImGui::Render();
+										ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+									}
 								}})
 		.push_constants(&pc_post_settings)
 		.bind_texture_with_sampler(fft_pong_padded, img_sampler)

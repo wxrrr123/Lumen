@@ -91,6 +91,8 @@ void main() {
 			vec3 atmosphere_L = pc.sky_col;
 #endif	// ENABLE_ATMOSPHERE
 			vec3 contribution = throughput * atmosphere_L;
+			report_numeric_vec3(1u, 13u, contribution);
+			if (has_nonfinite(contribution)) contribution = vec3(0);
 			if (depth > 1) {
 				col += contribution;
 			} else {
@@ -174,7 +176,10 @@ void main() {
 
 		if (depth == 0) {
 			// Fill in GBuffer
-			direct_lighting += throughput * hit_mat.emissive_factor;
+			vec3 primary_emissive = throughput * hit_mat.emissive_factor;
+			report_numeric_vec3(1u, 14u, primary_emissive);
+			if (has_nonfinite(primary_emissive)) primary_emissive = vec3(0);
+			direct_lighting += primary_emissive;
 			gbuffer_out.barycentrics = payload.attribs;
 			gbuffer_out.primitive_instance_id = uvec2(payload.triangle_idx, payload.instance_idx);
 		} else {
@@ -185,6 +190,9 @@ void main() {
 				mis_weight = 1.0 / (1 + pdf_light_w / bsdf_pdf_val);
 			}
 			vec3 partial_contrib = mis_weight * hit_mat.emissive_factor;
+			vec3 emissive_contribution = partial_contrib * throughput;
+			report_numeric_vec3(1u, 17u, emissive_contribution);
+			if (has_nonfinite(emissive_contribution)) emissive_contribution = vec3(0);
 
 			if (connectable_vertex_found && depth > 1) {
 #if STREAMING_MODE == STREAMING_MODE_INDIVIDUAL
@@ -198,6 +206,7 @@ void main() {
 					contrib *= mis_weight;
 					reconnection_data.rc_seed = floatBitsToUint(pdf_light_w);
 				}
+				if (has_nonfinite(contrib)) contrib = vec3(0);
 				reconnection_data.reservoir_contribution = calc_target_pdf(contrib);
 				reconnection_data.path_flags =
 					(reconnection_data.path_flags & 0xFFFF0000) |
@@ -214,12 +223,12 @@ void main() {
 				postfix_L += partial_contrib * postfix_throughput;
 #endif	// STREAMING_MODE == STREAMING_MODE_INDIVIDUAL
 			} else if (depth > 1) {
-				prefix_col += partial_contrib * throughput;
+				prefix_col += emissive_contribution;
 			}
 			if (depth == 1) {
-				direct_lighting += partial_contrib * throughput;
+				direct_lighting += emissive_contribution;
 			} else {
-				col += partial_contrib * throughput;
+				col += emissive_contribution;
 			}
 		}
 
@@ -253,6 +262,9 @@ void main() {
 			vec3 Li = do_nee(seed, gbuffer.pos, hit_mat, side, n_s, wo, light_record, reconnection_data.rc_Li,
 							 is_directional_light, Le, nee_wi, nee_pdf_light_w);
 			vec3 contribution = Li * throughput;
+			report_numeric_vec3(1u, 15u, Li);
+			report_numeric_vec3(1u, 16u, contribution);
+			if (has_nonfinite(contribution)) contribution = vec3(0);
 			// At 0 depth, we let ReSTIR DI handle the direct lighting
 			bool nee_connectable = depth > 0 && connectable;
 
@@ -356,9 +368,10 @@ void main() {
 		}
 	}
 
-	if (isnan(luminance(col))) {
-		return;
-	}
+	report_numeric_vec3(1u, 11u, col);
+	if (has_nonfinite(col)) col = vec3(0);
+	if (has_nonfinite(prefix_col)) prefix_col = vec3(0);
+	if (has_nonfinite(selected_contribution)) selected_contribution = vec3(0);
 	if (pc.enable_gris == 1 && connectable_vertex_found) {
 #if STREAMING_MODE == STREAMING_MODE_SPLIT
 		reconnection_data.rc_Li = postfix_L;
@@ -400,6 +413,8 @@ void main() {
 		}
 	}
 	if (pc.direct_lighting == 1) {
+		report_numeric_vec3(1u, 12u, direct_lighting);
+		if (has_nonfinite(direct_lighting)) direct_lighting = vec3(0);
 		col += direct_lighting;
 	}
 
@@ -408,6 +423,11 @@ void main() {
 		// The samples are additive, therefore set M to 1
 		reservoir.header.M = 1;
 		calc_reservoir_W(reservoir);
+		report_numeric_scalar(1u, 1u, reservoir.header.W);
+		report_numeric_scalar(1u, 2u, reservoir.header.w_sum);
+		report_numeric_scalar(1u, 3u, reservoir.header.target_pdf);
+		report_numeric_scalar(1u, 4u, reservoir.data.reservoir_contribution);
+		report_numeric_vec3(1u, 5u, selected_contribution);
 		prefix_contributions.d[pixel_idx] = prefix_col;
 		reservoir.data.seed_helpers = uvec2(pc.general_seed, pc.sampling_seed);
 		float uv_x = float(gl_LaunchIDEXT.x) / float(gl_LaunchSizeEXT.x);
@@ -448,11 +468,17 @@ void main() {
 		}
 	}
 
-	if (pc.enable_accumulation == 0 || pc.frame_num == 0) {
-		imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(col, 1.f));
-	} else {
+	report_numeric_vec3(1u, 7u, col);
+	if (has_nonfinite(col)) col = vec3(0);
+	vec3 accumulated_col = col;
+	if (pc.enable_accumulation != 0 && pc.frame_num != 0) {
 		float w = 1. / float(pc.frame_num + 1);
 		vec3 old_col = imageLoad(image, ivec2(gl_LaunchIDEXT.xy)).xyz;
-		imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(mix(old_col, col, w), 1.f));
+		report_numeric_vec3(1u, 8u, old_col);
+		if (has_nonfinite(old_col)) old_col = vec3(0);
+		accumulated_col = mix(old_col, col, w);
 	}
+	if (has_nonfinite(accumulated_col)) accumulated_col = vec3(0);
+	report_numeric_vec3(1u, 9u, accumulated_col);
+	imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(accumulated_col, 1.f));
 }

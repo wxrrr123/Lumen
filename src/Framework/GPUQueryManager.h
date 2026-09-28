@@ -7,10 +7,12 @@ namespace GPUQueryManager {
 struct TimestampData {
 	std::string names[2048];
 	uint64_t timestamps[4096];
-	uint32_t size;
+	uint32_t size = 0;
+	uint64_t frame_id = UINT64_MAX;
 };
 void begin(VkCommandBuffer cmd, const char* name);
 void end(VkCommandBuffer cmd);
+void set_frame_id(uint64_t frame_id);
 void collect(uint32_t curr_frame_idx);
 void collect();
 const TimestampData& get();

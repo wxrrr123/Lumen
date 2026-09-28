@@ -233,7 +233,12 @@ void LumenScene::load_scene(const std::string& path) {
     uint32_t height = Window::height();
     uint32_t total_pixels = width * height;
 
-    uint32_t max_depth = config.get()->path_length;
+    // Keep this banner consistent with the value ReSTIRPT will actually put in its
+    // push constants. The environment override is applied when the integrator is
+    // initialized, which happens after scene loading and therefore after this banner.
+    uint32_t max_depth = getenv("LUMEN_PATH_LENGTH")
+                             ? (uint32_t)atoi(getenv("LUMEN_PATH_LENGTH"))
+                             : (uint32_t)config.get()->path_length;
 
     // 3. 計算理論光線數 (Theoretical Ray Count)
     // 公式：Pixel數 * (1條主光線 + Depth * (1條反射 + 1條陰影))

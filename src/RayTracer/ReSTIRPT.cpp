@@ -3,7 +3,9 @@
 #include "LumenPCH.h"
 #include "ReSTIRPT.h"
 #include <algorithm>
+#include <array>
 #include <map>
+#include <tuple>
 #include <vulkan/vulkan_core.h>
 #include "imgui/imgui.h"
 
@@ -130,6 +132,18 @@ void ReSTIRPT::init() {
 								  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 						 .memory_type = vk::BufferType::GPU_TO_CPU,
 						 .size = Window::width() * Window::height() * (num_spatial_samples + 1) * sizeof(uint32_t)});
+	gris_cost_sink_buffer =
+		prm::get_buffer({.name = "GRIS Cost Sink",
+						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+						 .memory_type = vk::BufferType::GPU,
+						 .size = Window::width() * Window::height() * sizeof(uint32_t)});
+	std::array<uint32_t, 64> numeric_diagnostic_initial{};
+	gris_numeric_diagnostic_buffer =
+		prm::get_buffer({.name = "GRIS Numeric Diagnostic",
+						 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+						 .memory_type = vk::BufferType::GPU_TO_CPU,
+						 .size = numeric_diagnostic_initial.size() * sizeof(uint32_t),
+						 .data = numeric_diagnostic_initial.data()});
 
 	transformations_buffer = prm::get_buffer({
 		.name = "Transformations Buffer",
@@ -153,6 +167,8 @@ void ReSTIRPT::init() {
 	desc.gris_neighbor_distance_histogram_addr = gris_neighbor_distance_histogram_buffer->get_device_address();
 	desc.gris_replay_ray_count_addr = gris_replay_ray_count_buffer->get_device_address();
 	desc.gris_replay_shadow_ray_count_addr = gris_replay_shadow_ray_count_buffer->get_device_address();
+	desc.gris_cost_sink_addr = gris_cost_sink_buffer->get_device_address();
+	desc.gris_numeric_diagnostic_addr = gris_numeric_diagnostic_buffer->get_device_address();
 
 	lumen_scene->scene_desc_buffer =
 		prm::get_buffer({.name = "Scene Desc",
@@ -190,26 +206,75 @@ void ReSTIRPT::init() {
 								 vk::render_graph());
 	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_replay_shadow_ray_count_addr,
 								 gris_replay_shadow_ray_count_buffer, vk::render_graph());
+	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_cost_sink_addr, gris_cost_sink_buffer,
+								 vk::render_graph());
+	REGISTER_BUFFER_WITH_ADDRESS(SceneDesc, desc, gris_numeric_diagnostic_addr, gris_numeric_diagnostic_buffer,
+								 vk::render_graph());
 
 	path_length = getenv("LUMEN_PATH_LENGTH") ? atoi(getenv("LUMEN_PATH_LENGTH")) : config->path_length;
+	if (Window::is_headless()) {
+		profile_neighbor_access = false;
+	}
+	if (const char* profile_env = getenv("LUMEN_PROFILE_NEIGHBOR_ACCESS")) {
+		profile_neighbor_access = atoi(profile_env) != 0;
+	}
 	if (getenv("LUMEN_MIN_VERTEX_DISTANCE_RATIO")) {
 		min_vertex_distance_ratio = (float)atof(getenv("LUMEN_MIN_VERTEX_DISTANCE_RATIO"));
 	}
 
-	// SER cost-key reorder experiment variant. A (default): neither flag. D: cost-key computed,
-	// reorderThreadNV() never called -- the only variant guaranteed to produce a valid pipeline
-	// on hardware without VK_NV_ray_tracing_invocation_reorder, and the only one this GPU can
-	// validate correctness for. B: reorderThreadNV() called with no key. C: both (main result).
+	// Pass-specific SER cost-key variants. A (default): neither flag. B: constant-key reorder.
+	// C: cost-key reorder. D: compute the cost key without calling reorderThreadNV(). Keeping
+	// separate switches is required for isolated per-pass measurements and the final combined run.
+	auto parse_ser_variant = [](const char* variant, bool& enable_cost, bool& enable_reorder) {
+		if (variant && variant[0] == 'D') {
+			enable_cost = true;
+		} else if (variant && variant[0] == 'B') {
+			enable_reorder = true;
+		} else if (variant && variant[0] == 'C') {
+			enable_cost = true;
+			enable_reorder = true;
+		}
+	};
 	const char* ser_variant = getenv("LUMEN_SER_VARIANT");
-	if (ser_variant && ser_variant[0] == 'D') {
-		ser_enable_cost_reorder = true;
-	} else if (ser_variant && ser_variant[0] == 'B') {
-		ser_enable_reorder_call = true;
-	} else if (ser_variant && ser_variant[0] == 'C') {
-		ser_enable_cost_reorder = true;
-		ser_enable_reorder_call = true;
+	const char* validate_ser_variant = getenv("LUMEN_VALIDATE_SER_VARIANT");
+	const char* temporal_ser_variant = getenv("LUMEN_TEMPORAL_SER_VARIANT");
+	parse_ser_variant(ser_variant, ser_enable_cost_reorder, ser_enable_reorder_call);
+	parse_ser_variant(validate_ser_variant, validate_ser_enable_cost_reorder, validate_ser_enable_reorder_call);
+	parse_ser_variant(temporal_ser_variant, temporal_ser_enable_cost_reorder, temporal_ser_enable_reorder_call);
+	if (const char* profile_env = getenv("LUMEN_PROFILE_RETRACE_COST_KEY")) {
+		profile_retrace_cost_key = atoi(profile_env) != 0;
 	}
-	LUMEN_TRACE("[SER] variant: {}", ser_variant ? ser_variant : "A (default)");
+	if (const char* profile_env = getenv("LUMEN_PROFILE_VALIDATE_COST_KEY")) {
+		profile_validate_cost_key = atoi(profile_env) != 0;
+	}
+	if (const char* sink_env = getenv("LUMEN_VALIDATE_COST_SINK")) {
+		validate_cost_sink = atoi(sink_env) != 0;
+	}
+	if (const char* dummy_env = getenv("LUMEN_VALIDATE_DUMMY_WORDS")) {
+		char* end = nullptr;
+		const long words = std::strtol(dummy_env, &end, 10);
+		if (end == dummy_env || *end != '\0' || words < 0 || words > 64) {
+			LUMEN_ERROR("LUMEN_VALIDATE_DUMMY_WORDS must be an integer in [0, 64]");
+		}
+		validate_dummy_words = int(words);
+	}
+	if (const char* profile_env = getenv("LUMEN_PROFILE_TEMPORAL_COST_KEY")) {
+		profile_temporal_cost_key = atoi(profile_env) != 0;
+	}
+	if (const char* sink_env = getenv("LUMEN_TEMPORAL_COST_SINK")) {
+		temporal_cost_sink = atoi(sink_env) != 0;
+	}
+	if (const char* profile_env = getenv("LUMEN_PROFILE_NUMERIC_STABILITY")) {
+		profile_numeric_stability = atoi(profile_env) != 0;
+	}
+	if (const char* profile_env = getenv("LUMEN_PROFILE_COST_ACCURACY")) {
+		profile_cost_accuracy = atoi(profile_env) != 0;
+	}
+	LUMEN_TRACE("[SER] Retrace variant: {}; Validate variant: {}; Validate sink: {}; Validate dummy words: {}; Temporal variant: {}; Temporal sink: {}",
+				ser_variant ? ser_variant : "A (default)",
+				validate_ser_variant ? validate_ser_variant : "A (default)", validate_cost_sink,
+				validate_dummy_words,
+				temporal_ser_variant ? temporal_ser_variant : "A (default)", temporal_cost_sink);
 }
 
 void ReSTIRPT::render() {
@@ -279,7 +344,8 @@ void ReSTIRPT::render() {
 								 {"src/shaders/ray_shadow.rmiss"},
 								 {"src/shaders/integrators/restir/gris/ray.rchit"}},
 					 .macros = {{"STREAMING_MODE", int(streaming_method)},
-								vk::ShaderMacro("ENABLE_ATMOSPHERE", enable_atmosphere)},
+								vk::ShaderMacro("ENABLE_ATMOSPHERE", enable_atmosphere),
+								vk::ShaderMacro("PROFILE_NUMERIC_STABILITY", profile_numeric_stability)},
 					 .dims = {Window::width(), Window::height()},
 				 })
 		.push_constants(&pc_ray)
@@ -306,6 +372,14 @@ void ReSTIRPT::render() {
 									 {"src/shaders/integrators/restir/gris/ray.rmiss"},
 									 {"src/shaders/ray_shadow.rmiss"},
 									 {"src/shaders/integrators/restir/gris/ray.rchit"}},
+						 .macros = {
+							 vk::ShaderMacro("ENABLE_TEMPORAL_COST_REORDER", temporal_ser_enable_cost_reorder),
+							 vk::ShaderMacro("ENABLE_TEMPORAL_REORDER_CALL", temporal_ser_enable_reorder_call),
+							 vk::ShaderMacro("PROFILE_TEMPORAL_COST_KEY", profile_temporal_cost_key),
+							 vk::ShaderMacro("ENABLE_TEMPORAL_COST_SINK", temporal_cost_sink),
+							 vk::ShaderMacro("PROFILE_REPLAY_RAY_COUNT",
+											 profile_cost_accuracy && profile_temporal_cost_key),
+							 vk::ShaderMacro("PROFILE_NUMERIC_STABILITY", profile_numeric_stability)},
 						 .dims = {Window::width(), Window::height()},
 					 })
 			.push_constants(&pc_ray)
@@ -345,38 +419,51 @@ void ReSTIRPT::render() {
 					.bind_tlas(tlas);
 			} else {
 				// Retrace
-				vk::render_graph()
-					->add_rt("GRIS - Retrace Reservoirs",
+				auto& retrace_pass = vk::render_graph()->add_rt("GRIS - Retrace Reservoirs",
 							 {
 								 .shaders = {{"src/shaders/integrators/restir/gris/retrace_paths.rgen"},
 											 {"src/shaders/integrators/restir/gris/ray.rmiss"},
 											 {"src/shaders/ray_shadow.rmiss"},
 											 {"src/shaders/integrators/restir/gris/ray.rchit"}},
-								 .macros = {vk::ShaderMacro("ENABLE_COST_REORDER", ser_enable_cost_reorder),
-										   vk::ShaderMacro("ENABLE_REORDER_CALL", ser_enable_reorder_call)},
+							 .macros = {vk::ShaderMacro("ENABLE_COST_REORDER", ser_enable_cost_reorder),
+										   vk::ShaderMacro("ENABLE_REORDER_CALL", ser_enable_reorder_call),
+										   vk::ShaderMacro("PROFILE_RETRACE_COST_KEY", profile_retrace_cost_key),
+										   vk::ShaderMacro("PROFILE_REPLAY_RAY_COUNT",
+													   profile_cost_accuracy && profile_retrace_cost_key),
+										   vk::ShaderMacro("PROFILE_NUMERIC_STABILITY", profile_numeric_stability)},
 								 .dims = {Window::width(), Window::height()},
-							 })
-					.push_constants(&pc_ray)
+							 });
+				retrace_pass.push_constants(&pc_ray)
 					.bind(common_bindings)
 					.bind(reconnection_buffer)
 					.bind(reservoir_buffers[WRITE_OR_CURR_IDX])
 					.bind(gbuffers[pong])
 					.bind(flag_buffers[WRITE_OR_CURR_IDX])
 					.bind(compact_buffers[WRITE_OR_CURR_IDX])
-					.zero(gris_replay_ray_count_buffer)
-					.zero(gris_replay_shadow_ray_count_buffer)
 					.bind_texture_array(lumen_scene->scene_textures)
 					.bind_tlas(tlas);
+				if (!(profile_cost_accuracy && profile_temporal_cost_key)) {
+					retrace_pass.zero(gris_replay_ray_count_buffer).zero(gris_replay_shadow_ray_count_buffer);
+				}
 				// Validate
 				vk::render_graph()
 					->add_rt("GRIS - Validate Samples",
 							 {
-								 .shaders = {{"src/shaders/integrators/restir/gris/validate_samples.rgen"},
-											 {"src/shaders/integrators/restir/gris/ray.rmiss"},
-											 {"src/shaders/ray_shadow.rmiss"},
-											 {"src/shaders/integrators/restir/gris/ray.rchit"}},
-								 .dims = {Window::width(), Window::height()},
-							 })
+							 .shaders = {{"src/shaders/integrators/restir/gris/validate_samples.rgen"},
+										 {"src/shaders/integrators/restir/gris/ray.rmiss"},
+										 {"src/shaders/ray_shadow.rmiss"},
+										 {"src/shaders/integrators/restir/gris/ray.rchit"}},
+							 .macros = {
+								 vk::ShaderMacro("ENABLE_VALIDATE_COST_REORDER", validate_ser_enable_cost_reorder),
+								 vk::ShaderMacro("ENABLE_VALIDATE_REORDER_CALL", validate_ser_enable_reorder_call),
+								 vk::ShaderMacro("PROFILE_VALIDATE_COST_KEY", profile_validate_cost_key),
+								 vk::ShaderMacro("ENABLE_VALIDATE_COST_SINK", validate_cost_sink),
+								 vk::ShaderMacro("VALIDATE_DUMMY_WORDS", validate_dummy_words),
+								 vk::ShaderMacro("PROFILE_REPLAY_RAY_COUNT",
+												profile_cost_accuracy && profile_validate_cost_key),
+								 vk::ShaderMacro("PROFILE_NUMERIC_STABILITY", profile_numeric_stability)},
+							 .dims = {Window::width(), Window::height()},
+						 })
 					.push_constants(&pc_ray)
 					.bind(common_bindings)
 					.bind(reconnection_buffer)
@@ -396,7 +483,8 @@ void ReSTIRPT::render() {
 										{"src/shaders/integrators/restir/gris/ray.rmiss"},
 										{"src/shaders/ray_shadow.rmiss"},
 										{"src/shaders/integrators/restir/gris/ray.rchit"}},
-							.macros = {vk::ShaderMacro("ENABLE_DEFENSIVE_PAIRWISE_MIS", enable_defensive_formulation)},
+							.macros = {vk::ShaderMacro("ENABLE_DEFENSIVE_PAIRWISE_MIS", enable_defensive_formulation),
+										   vk::ShaderMacro("PROFILE_NUMERIC_STABILITY", profile_numeric_stability)},
 							.dims = {Window::width(), Window::height()},
 						})
 					.push_constants(&pc_ray)
@@ -455,6 +543,100 @@ void ReSTIRPT::render() {
 		LUMEN_TRACE("spatial importance: {}, compact slot count: {}", spatial_importance, compact_slot_count);
 		
 		vmaUnmapMemory(vk::context().allocator, debug_vis_buffer->allocation);
+	}
+
+	if (profile_retrace_cost_key || profile_validate_cost_key || profile_temporal_cost_key) {
+		vkDeviceWaitIdle(vk::context().device);
+		const uint32_t total_pixels = Window::width() * Window::height();
+		vmaInvalidateAllocation(vk::context().allocator, debug_vis_buffer->allocation, 0,
+							  debug_vis_buffer->size);
+		void* mapped = nullptr;
+		vmaMapMemory(vk::context().allocator, debug_vis_buffer->allocation, &mapped);
+		const uint32_t* cost_keys = static_cast<const uint32_t*>(mapped);
+		std::map<uint32_t, uint32_t> histogram;
+		for (uint32_t i = 0; i < total_pixels; i++) histogram[cost_keys[i]]++;
+		std::vector<uint32_t> cost_key_copy;
+		if (profile_cost_accuracy) cost_key_copy.assign(cost_keys, cost_keys + total_pixels);
+		vmaUnmapMemory(vk::context().allocator, debug_vis_buffer->allocation);
+
+		const char* pass_name = profile_retrace_cost_key ? "Retrace" :
+			profile_validate_cost_key ? "Validate" : "Temporal";
+		LUMEN_TRACE("=== {} cost-key distribution ({} pixels) ===", pass_name, total_pixels);
+		for (const auto& [key, count] : histogram) {
+			LUMEN_TRACE("  cost_key={}: {} pixels ({:.2f}%)", key, count, count * 100.0f / total_pixels);
+		}
+
+		if (profile_cost_accuracy) {
+			vmaInvalidateAllocation(vk::context().allocator, gris_replay_ray_count_buffer->allocation, 0,
+								  gris_replay_ray_count_buffer->size);
+			vmaInvalidateAllocation(vk::context().allocator, gris_replay_shadow_ray_count_buffer->allocation, 0,
+								  gris_replay_shadow_ray_count_buffer->size);
+			void* mapped_primary = nullptr;
+			void* mapped_shadow = nullptr;
+			vmaMapMemory(vk::context().allocator, gris_replay_ray_count_buffer->allocation, &mapped_primary);
+			vmaMapMemory(vk::context().allocator, gris_replay_shadow_ray_count_buffer->allocation, &mapped_shadow);
+			const uint32_t* primary_raw = static_cast<const uint32_t*>(mapped_primary);
+			const uint32_t* shadow_raw = static_cast<const uint32_t*>(mapped_shadow);
+			std::vector<uint32_t> primary(total_pixels, 0u), shadow(total_pixels, 0u), total(total_pixels, 0u);
+			const uint32_t slots_per_pixel = num_spatial_samples + 1;
+			for (uint32_t px = 0; px < total_pixels; px++) {
+				if (profile_retrace_cost_key) {
+					for (uint32_t i = 1; i < slots_per_pixel; i++) {
+						primary[px] += primary_raw[slots_per_pixel * px + i];
+						shadow[px] += shadow_raw[slots_per_pixel * px + i];
+					}
+				} else {
+					primary[px] = primary_raw[px];
+					shadow[px] = shadow_raw[px];
+				}
+				total[px] = primary[px] + shadow[px];
+			}
+			vmaUnmapMemory(vk::context().allocator, gris_replay_shadow_ray_count_buffer->allocation);
+			vmaUnmapMemory(vk::context().allocator, gris_replay_ray_count_buffer->allocation);
+
+			auto report_correlation = [&](const char* actual_name, const std::vector<uint32_t>& actual) {
+				long double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, abs_error = 0;
+				long double asx = 0, asy = 0, asxx = 0, asyy = 0, asxy = 0;
+				uint64_t active = 0, exact = 0;
+				for (uint32_t i = 0; i < total_pixels; i++) {
+					long double x = cost_key_copy[i], y = actual[i];
+					sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
+					abs_error += std::abs(x - y);
+					exact += cost_key_copy[i] == actual[i];
+					if (cost_key_copy[i] != 0 || actual[i] != 0) {
+						active++;
+						asx += x; asy += y; asxx += x * x; asyy += y * y; asxy += x * y;
+					}
+				}
+				auto pearson = [](long double n, long double x, long double y, long double xx,
+								  long double yy, long double xy) {
+					long double denom = std::sqrt((n * xx - x * x) * (n * yy - y * y));
+					return denom > 0 ? double((n * xy - x * y) / denom) : 0.0;
+				};
+				LUMEN_TRACE("[COST-ACCURACY] pass={} actual={} pixels={} active={} pearson_all={:.6f} "
+							"pearson_active={:.6f} mae={:.6f} exact={:.2f}%",
+							pass_name, actual_name, total_pixels, active,
+							pearson(total_pixels, sx, sy, sxx, syy, sxy),
+							pearson(active, asx, asy, asxx, asyy, asxy),
+							double(abs_error / total_pixels), exact * 100.0 / total_pixels);
+			};
+			report_correlation("primary", primary);
+			report_correlation("primary+shadow", total);
+
+			std::map<std::tuple<uint32_t, uint32_t, uint32_t>, uint32_t> joint;
+			for (uint32_t i = 0; i < total_pixels; i++) joint[{cost_key_copy[i], primary[i], shadow[i]}]++;
+			const char* csv_env = getenv("LUMEN_COST_ACCURACY_CSV");
+			std::string csv_path = csv_env ? csv_env : "cost_accuracy.csv";
+			std::ofstream csv(csv_path);
+			csv << "predicted_cost,primary_rays,shadow_rays,total_rays,thread_count\n";
+			for (const auto& [values, count] : joint) {
+				auto [predicted, primary_count, shadow_count] = values;
+				csv << predicted << ',' << primary_count << ',' << shadow_count << ','
+					<< primary_count + shadow_count << ',' << count << '\n';
+			}
+			LUMEN_TRACE("[COST-ACCURACY] joint distribution written to {} ({} populated bins)", csv_path,
+						joint.size());
+		}
 	}
 
 	if (pc_ray.profile_neighbor_access) {
@@ -600,6 +782,19 @@ bool ReSTIRPT::update() {
 }
 
 void ReSTIRPT::destroy() {
+	if (profile_numeric_stability) {
+		vkDeviceWaitIdle(vk::context().device);
+		vmaInvalidateAllocation(vk::context().allocator, gris_numeric_diagnostic_buffer->allocation, 0,
+							  gris_numeric_diagnostic_buffer->size);
+		void* mapped = nullptr;
+		vmaMapMemory(vk::context().allocator, gris_numeric_diagnostic_buffer->allocation, &mapped);
+		const uint32_t* d = static_cast<const uint32_t*>(mapped);
+		LUMEN_TRACE("[NUMERIC] found={} first_frame={} first_stage={} first_pixel={} first_kind={} first_value_bits=0x{:08x}",
+				d[0], d[1], d[2], d[3], d[4], d[5]);
+		LUMEN_TRACE("[NUMERIC] stage_counts generate={} temporal={} retrace={} validate={} spatial={}",
+				d[17], d[18], d[19], d[20], d[21]);
+		vmaUnmapMemory(vk::context().allocator, gris_numeric_diagnostic_buffer->allocation);
+	}
 	Integrator::destroy();
 	auto buffer_list = {gris_gbuffer,
 						gris_reservoir_ping_buffer,
@@ -615,7 +810,11 @@ void ReSTIRPT::destroy() {
 						gris_prev_gbuffer,
 						debug_vis_buffer,
 						gris_neighbor_access_count_buffer,
-						gris_neighbor_distance_histogram_buffer};
+						gris_neighbor_distance_histogram_buffer,
+						gris_replay_ray_count_buffer,
+						gris_replay_shadow_ray_count_buffer,
+						gris_cost_sink_buffer,
+						gris_numeric_diagnostic_buffer};
 	for (vk::Buffer* b : buffer_list) {
 		prm::remove(b);
 	}

@@ -21,6 +21,9 @@ class RayTracer {
 	void init();
 	void update();
 	void cleanup();
+	void set_gpu_timing_enabled(bool enabled);
+	void capture_next_output();
+	void save_output(const std::string& path);
 	static RayTracer* instance;
 	inline static RayTracer* get() { return instance; }
 	bool resized = false;
@@ -37,6 +40,9 @@ class RayTracer {
 	bool gui();
 	void destroy_accel();
 	bool initialized = false;
+	bool gpu_timing_enabled = false;
+	bool profile_frame_markers = false;
+	std::chrono::steady_clock::time_point profile_render_start{};
 	float cpu_avg_time = 0;
 	int cnt = 0;
 	std::unique_ptr<Integrator> integrator;
@@ -54,6 +60,7 @@ class RayTracer {
 
 	vk::Texture* reference_tex;
 	vk::Texture* target_tex;
+	vk::Texture* headless_output_tex = nullptr;
 
 	std::string scene_name;
 	LumenScene scene;
@@ -61,6 +68,7 @@ class RayTracer {
 	clock_t start;
 	bool debug = false;
 	bool write_exr = true;
+	bool capture_output_buffer = false;
 	bool has_gt = false;
 	bool show_cam_stats = false;
 
