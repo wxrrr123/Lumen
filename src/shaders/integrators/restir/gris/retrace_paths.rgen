@@ -38,6 +38,14 @@ uvec4 seed2 = init_rng(gl_LaunchIDEXT.xy, gl_LaunchSizeEXT.xy, pc.seed2);
 layout(buffer_reference, scalar, buffer_reference_align = 4) buffer DebugVisBuffer { uint d[]; };
 DebugVisBuffer debug_vis = DebugVisBuffer(scene_desc.debug_vis_addr);
 
+// Optional measurement sink: A/B store zero; C/D store their real key. All
+// variants pay the same buffer-reference store, and D's runtime key remains
+// observable even without a reorder call. Off unless explicitly requested.
+#ifdef ENABLE_RETRACE_COST_SINK
+layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer RetraceCostSinkBuffer { uint d[]; };
+RetraceCostSinkBuffer retrace_cost_sink = RetraceCostSinkBuffer(scene_desc.gris_cost_sink_addr);
+#endif
+
 // SER cost-key reorder experiment. Measured per-thread max (summed over a pixel's N neighbors,
 // see divergence-study/results-2026-09-01-lumen-baseline.md M4) is 16 on classroom -- 5 bits
 // (0-31) covers it with headroom. Start here, sweep later if needed.
@@ -150,6 +158,10 @@ void main() {
 	// measure nothing. B and C must differ ONLY in the key's content, not its bit width, for the
 	// B-vs-C comparison to isolate what the real cost_key is worth.
 	reorderThreadNV(0u, COST_KEY_BITS);
+#endif
+
+#ifdef ENABLE_RETRACE_COST_SINK
+	retrace_cost_sink.d[pixel_idx] = cost_key;
 #endif
 
 	uint hot_terminates = 0;

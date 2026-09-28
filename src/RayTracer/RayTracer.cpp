@@ -26,6 +26,9 @@ RayTracer::RayTracer(bool debug, int argc, char* argv[]) : debug(debug) {
 
 void RayTracer::init() {
 	gpu_timing_enabled = getenv("LUMEN_LOG_GPU_TIMING") != nullptr;
+	if (const char* elapsed_env = getenv("LUMEN_LOG_FRAME_TIME")) {
+		log_frame_time = atoi(elapsed_env) != 0;
+	}
 	if (const char* marker_env = getenv("LUMEN_PROFILE_FRAME_MARKERS")) {
 		profile_frame_markers = atoi(marker_env) != 0;
 	}
@@ -238,7 +241,9 @@ void RayTracer::render(uint32_t i) {
 	auto cmdbuf = vk::context().command_buffers[i];
 	VkCommandBufferBeginInfo begin_info = vk::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 	vk::check(vkBeginCommandBuffer(cmdbuf, &begin_info));
-	GPUQueryManager::set_frame_id(integrator->frame_num);
+	const uint64_t cpu_frame_start_ns = log_frame_time ? uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count()) : 0;
+	GPUQueryManager::set_frame_id(integrator->frame_num, cpu_frame_start_ns);
 	// Capture-only CPU markers prove the selected frames followed actual rendering
 	// warmup. Shader work and the regular timing path do not enable this option.
 	if (profile_frame_markers) {
@@ -557,6 +562,11 @@ float RayTracer::draw_frame() {
 			uint64_t gpu_end = query_results.timestamps[query_results.size - 1];
 			LUMEN_TRACE("[SER] frame {} GPU full-frame time: {:.4f} ms", query_results.frame_id,
 						(gpu_end - gpu_start) * 1e-6);
+			if (log_frame_time && gpu_measurement_start_ns != 0
+				&& query_results.cpu_frame_start_ns >= gpu_measurement_start_ns) {
+				LUMEN_TRACE("[FRAME-TIME] frame {} measurement_elapsed_ms={:.3f}", query_results.frame_id,
+					(query_results.cpu_frame_start_ns - gpu_measurement_start_ns) * 1e-6);
+			}
 			bool found_retrace = false;
 			for (size_t i = 0; i < query_results.size; i += 2) {
 				double diff_ms = (query_results.timestamps[i + 1] - query_results.timestamps[i]) * 1e-6;
@@ -610,6 +620,10 @@ void RayTracer::save_output(const std::string& path) {
 void RayTracer::set_gpu_timing_enabled(bool enabled) {
 	gpu_timing_enabled = enabled;
 	if (enabled) {
+		if (log_frame_time) {
+			gpu_measurement_start_ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		}
 		LUMEN_TRACE("[MEASUREMENT] GPU timing starts at frame {}", integrator->frame_num);
 	}
 }

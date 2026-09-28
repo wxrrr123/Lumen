@@ -244,6 +244,9 @@ void ReSTIRPT::init() {
 	if (const char* profile_env = getenv("LUMEN_PROFILE_RETRACE_COST_KEY")) {
 		profile_retrace_cost_key = atoi(profile_env) != 0;
 	}
+	if (const char* sink_env = getenv("LUMEN_RETRACE_COST_SINK")) {
+		retrace_cost_sink = atoi(sink_env) != 0;
+	}
 	if (const char* profile_env = getenv("LUMEN_PROFILE_VALIDATE_COST_KEY")) {
 		profile_validate_cost_key = atoi(profile_env) != 0;
 	}
@@ -275,6 +278,7 @@ void ReSTIRPT::init() {
 				validate_ser_variant ? validate_ser_variant : "A (default)", validate_cost_sink,
 				validate_dummy_words,
 				temporal_ser_variant ? temporal_ser_variant : "A (default)", temporal_cost_sink);
+	LUMEN_TRACE("[SER] Retrace sink: {}", retrace_cost_sink);
 }
 
 void ReSTIRPT::render() {
@@ -426,7 +430,8 @@ void ReSTIRPT::render() {
 											 {"src/shaders/ray_shadow.rmiss"},
 											 {"src/shaders/integrators/restir/gris/ray.rchit"}},
 							 .macros = {vk::ShaderMacro("ENABLE_COST_REORDER", ser_enable_cost_reorder),
-										   vk::ShaderMacro("ENABLE_REORDER_CALL", ser_enable_reorder_call),
+									   vk::ShaderMacro("ENABLE_REORDER_CALL", ser_enable_reorder_call),
+									   vk::ShaderMacro("ENABLE_RETRACE_COST_SINK", retrace_cost_sink),
 										   vk::ShaderMacro("PROFILE_RETRACE_COST_KEY", profile_retrace_cost_key),
 										   vk::ShaderMacro("PROFILE_REPLAY_RAY_COUNT",
 													   profile_cost_accuracy && profile_retrace_cost_key),

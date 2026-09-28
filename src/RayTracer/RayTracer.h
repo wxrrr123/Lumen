@@ -41,6 +41,8 @@ class RayTracer {
 	void destroy_accel();
 	bool initialized = false;
 	bool gpu_timing_enabled = false;
+	bool log_frame_time = false;
+	uint64_t gpu_measurement_start_ns = 0;
 	bool profile_frame_markers = false;
 	std::chrono::steady_clock::time_point profile_render_start{};
 	float cpu_avg_time = 0;

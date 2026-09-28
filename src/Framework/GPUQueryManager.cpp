@@ -21,12 +21,16 @@ void end(VkCommandBuffer cmd) {
 	_pool_data[_curr_pool_idx].size = _curr_query_idx;
 }
 
-void set_frame_id(uint64_t frame_id) { _pool_data[_curr_pool_idx].frame_id = frame_id; }
+void set_frame_id(uint64_t frame_id, uint64_t cpu_frame_start_ns) {
+	_pool_data[_curr_pool_idx].frame_id = frame_id;
+	_pool_data[_curr_pool_idx].cpu_frame_start_ns = cpu_frame_start_ns;
+}
 
 void collect(uint32_t curr_frame_idx) {
 	auto& pool_data = _pool_data[curr_frame_idx];
 	_data.size = pool_data.size;
 	_data.frame_id = pool_data.frame_id;
+	_data.cpu_frame_start_ns = pool_data.cpu_frame_start_ns;
 	// Note: curr_frame_idx is the index of the command buffer that has finished its execution
 	if (pool_data.size > 0) {
 		vkGetQueryPoolResults(vk::context().device, vk::context().query_pool_timestamps[curr_frame_idx], 0,
@@ -40,6 +44,7 @@ void collect(uint32_t curr_frame_idx) {
 	_curr_query_idx = 0;
 	pool_data.size = 0;
 	pool_data.frame_id = UINT64_MAX;
+	pool_data.cpu_frame_start_ns = 0;
 	vkResetQueryPool(vk::context().device, vk::context().query_pool_timestamps[curr_frame_idx], 0, 4096);
 }
 

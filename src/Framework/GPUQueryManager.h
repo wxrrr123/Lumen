@@ -9,10 +9,11 @@ struct TimestampData {
 	uint64_t timestamps[4096];
 	uint32_t size = 0;
 	uint64_t frame_id = UINT64_MAX;
+	uint64_t cpu_frame_start_ns = 0;
 };
 void begin(VkCommandBuffer cmd, const char* name);
 void end(VkCommandBuffer cmd);
-void set_frame_id(uint64_t frame_id);
+void set_frame_id(uint64_t frame_id, uint64_t cpu_frame_start_ns = 0);
 void collect(uint32_t curr_frame_idx);
 void collect();
 const TimestampData& get();

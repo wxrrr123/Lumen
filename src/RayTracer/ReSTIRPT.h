@@ -74,6 +74,7 @@ class ReSTIRPT final : public Integrator {
 	bool ser_enable_cost_reorder = false;	// D, C
 	bool ser_enable_reorder_call = false;	// B, C
 	bool profile_retrace_cost_key = false;
+	bool retrace_cost_sink = false;
 	bool validate_ser_enable_cost_reorder = false;	// D, C
 	bool validate_ser_enable_reorder_call = false;	// B, C
 	bool profile_validate_cost_key = false;
