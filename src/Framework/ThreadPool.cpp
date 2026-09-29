@@ -7,9 +7,16 @@ std::queue<std::function<void()>> ThreadPool::work_queue;
 std::mutex ThreadPool::queue_mutex;
 std::condition_variable ThreadPool::cv;
 std::vector<std::thread> ThreadPool::threads;
+bool ThreadPool::serial = false;
 void ThreadPool::init() {
 	uint32_t thread_count = std::thread::hardware_concurrency();
 	done = false;
+	const char* serial_env = getenv("LUMEN_SERIAL_TASKS");
+	serial = serial_env && serial_env[0] == '1';
+	if (serial) {
+		LUMEN_TRACE("ThreadPool: serial mode (LUMEN_SERIAL_TASKS=1), tasks run inline");
+		return;
+	}
 	try {
 		threads.reserve(thread_count);
 		for (uint32_t i = 0; i < thread_count; i++) {
