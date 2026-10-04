@@ -63,7 +63,7 @@ class ReSTIRPT final : public Integrator {
 	bool enable_occlusion = true;
 	bool enable_temporal_jitter = true;
 	bool profile_neighbor_access = true;
-	bool stable_neighbor_offset = true;
+	bool stable_neighbor_offset = false;
 	float spatial_reuse_radius = 32.0f;
 	float min_vertex_distance_ratio = 0.00f;
 	float gris_separator = 1.0f;
