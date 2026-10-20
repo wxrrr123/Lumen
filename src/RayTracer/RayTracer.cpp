@@ -11,13 +11,21 @@ RayTracer* RayTracer::instance = nullptr;
 bool load_reference = false;
 bool calc_rmse = false;
 
+static double now_ms() {
+	if (Window::is_headless()) {
+		using namespace std::chrono;
+		return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+	}
+	return glfwGetTime() * 1000.0;
+}
+
 RayTracer::RayTracer(bool debug, int argc, char* argv[]) : debug(debug) {
 	instance = this;
 	parse_args(argc, argv);
 }
 
 void RayTracer::init() {
-	srand((uint32_t)time(NULL));
+	srand(getenv("LUMEN_FIXED_SEED") ? (uint32_t)atoi(getenv("LUMEN_FIXED_SEED")) : (uint32_t)time(NULL));
 	Window::add_key_callback([this](KeyInput key, KeyAction action) {
 		if (Window::is_key_down(KeyInput::KEY_F1)) {
 			show_ui = !show_ui;
@@ -65,6 +73,8 @@ void RayTracer::init() {
 	}
 	post_fx.init();
 	init_resources();
+	write_exr = !Window::is_headless();
+	if (const char* value = getenv("LUMEN_WRITE_EXR")) write_exr = atoi(value) != 0;
 	LUMEN_TRACE("Memory usage {} MB", vk::get_memory_usage(vk::context().physical_device) * 1e-6);
 }
 
@@ -112,6 +122,12 @@ void RayTracer::init_resources() {
 	reference_tex = prm::get_texture(texture_desc);
 	texture_desc.name = "Target Texture";
 	target_tex = prm::get_texture(texture_desc);
+	if (Window::is_headless()) {
+		headless_output_tex = prm::get_texture({.name = "Headless Display Output",
+												 .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+												 .dimensions = {Window::width(), Window::height(), 1},
+												 .format = vk::display_format()});
+	}
 
 	RTUtilsDesc rt_utils_desc;
 	if (load_reference) {
@@ -153,6 +169,7 @@ void RayTracer::cleanup_resources() {
 	std::vector<vk::Buffer*> buffer_list = {output_img_buffer, output_img_buffer_cpu, residual_buffer,
 											counter_buffer,	   rmse_val_buffer,		  rt_utils_desc_buffer};
 	std::vector<vk::Texture*> tex_list = {reference_tex, target_tex};
+	if (headless_output_tex) tex_list.push_back(headless_output_tex);
 	if (load_reference) {
 		buffer_list.push_back(gt_img_buffer);
 	}
@@ -186,7 +203,8 @@ void RayTracer::render(uint32_t i) {
 	} else {
 		input_tex = integrator->output_tex;
 	}
-	post_fx.render(input_tex, vk::swapchain_images()[i]);
+	vk::Texture* display_output = Window::is_headless() ? headless_output_tex : vk::swapchain_images()[i];
+	post_fx.render(input_tex, display_output);
 	render_debug_utils();
 
 	auto cmdbuf = vk::context().command_buffers[i];
@@ -197,7 +215,7 @@ void RayTracer::render(uint32_t i) {
 }
 
 void RayTracer::render_debug_utils() {
-	if (write_exr) {
+	if (write_exr || capture_output_buffer) {
 		vk::render_graph()->current_pass().copy(integrator->output_tex, output_img_buffer_cpu);
 	} else if (capture_ref_img) {
 		vk::render_graph()->current_pass().copy(integrator->output_tex, reference_tex);
@@ -239,6 +257,7 @@ void RayTracer::render_debug_utils() {
 			.push_constants(&rt_utils_pc)
 			.bind(rt_utils_desc_buffer);
 	}
+	capture_output_buffer = false;
 }
 
 void RayTracer::create_integrator(int integrator_idx) {
@@ -388,40 +407,43 @@ float RayTracer::draw_frame() {
 	auto resize_func = [this]() {
 
 	};
-	auto t_begin = glfwGetTime() * 1000;
+	const bool headless = Window::is_headless();
+	auto t_begin = now_ms();
 	bool updated = false;
 	uint32_t image_idx = vk::prepare_frame();
 	if (image_idx == UINT32_MAX) {
-		auto t_end = glfwGetTime() * 1000;
+		auto t_end = now_ms();
 		auto t_diff = t_end - t_begin;
 		return (float)t_diff;
 	}
-	ImGui_ImplVulkan_NewFrame();
-	ImGui_ImplGlfw_NewFrame();
-	ImGui::NewFrame();
+	if (!headless) {
+		ImGui_ImplVulkan_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
 
-	integrator->updated |= updated;
-	if (show_ui) {
-		ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Once);
-		ImGui::Begin("Debug (F1 to hide)", &show_ui);
-		bool gui_updated = gui();
-		gui_updated |= integrator->gui();
-		gui_updated |= post_fx.gui();
-		static bool show_imgui_demo = false;
-		if (ImGui::Button("Show ImGui Demo")) {
-			show_imgui_demo = !show_imgui_demo;
+		integrator->updated |= updated;
+		if (show_ui) {
+			ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Once);
+			ImGui::Begin("Debug (F1 to hide)", &show_ui);
+			bool gui_updated = gui();
+			gui_updated |= integrator->gui();
+			gui_updated |= post_fx.gui();
+			static bool show_imgui_demo = false;
+			if (ImGui::Button("Show ImGui Demo")) {
+				show_imgui_demo = !show_imgui_demo;
+			}
+			if (show_imgui_demo) {
+				ImGui::ShowDemoWindow(&show_imgui_demo);
+			}
+			ImGui::End();
+			integrator->updated |= gui_updated;
 		}
-		if (show_imgui_demo) {
-			ImGui::ShowDemoWindow(&show_imgui_demo);
-		}
-		ImGui::End();
-		integrator->updated |= gui_updated;
 	}
 
 	render(image_idx);
 	VkResult result = vk::submit_frame(image_idx);
 	vk::render_graph()->reset();
-	if (result != VK_SUCCESS) {
+	if (!headless && result != VK_SUCCESS) {
 		Window::update_window_size();
 		const float aspect_ratio = (float)Window::width() / Window::height();
 		const PerspectiveCamera* old_cam = (PerspectiveCamera*)scene.camera.get();
@@ -432,7 +454,7 @@ float RayTracer::draw_frame() {
 		cleanup_resources();
 		integrator->destroy();
 		post_fx.destroy();
-		vk::destroy_imgui();
+		if (!Window::is_headless()) vk::destroy_imgui();
 
 		integrator->init();
 		post_fx.init();
@@ -453,10 +475,10 @@ float RayTracer::draw_frame() {
 	// 	exit(0);
 	// }
 
-	if (write_exr && integrator->frame_num % 5 == 0 && integrator->frame_num < 500) {
+	if (write_exr && (headless || integrator->frame_num % 5 == 0) && integrator->frame_num < 500) {
 		// write_exr = false;
 		vkDeviceWaitIdle(vk::context().device);
-		std::string filename = "output/restirpt_nee5_output/out_" + std::to_string(integrator->frame_num) + ".exr";
+		std::string filename = "output/frames/out_" + std::to_string(integrator->frame_num) + ".exr";
 		ImageUtils::save_exr((float*)vk::map_buffer(output_img_buffer_cpu), Window::width(), Window::height(),
 							 filename.c_str());
 		vk::unmap_buffer(output_img_buffer_cpu);
@@ -470,7 +492,7 @@ float RayTracer::draw_frame() {
 		LUMEN_TRACE("RMSE {}", rmse * 1e6);
 		start = now;
 	}
-	auto t_end = glfwGetTime() * 1000;
+	auto t_end = now_ms();
 	auto t_diff = t_end - t_begin;
 	cnt++;
 	return (float)t_diff;
@@ -485,6 +507,16 @@ void RayTracer::parse_args(int argc, char* argv[]) {
 		}
 	}
 }
+void RayTracer::save_output(const std::string& path) {
+	vkDeviceWaitIdle(vk::context().device);
+	ImageUtils::save_exr((float*)vk::map_buffer(output_img_buffer_cpu), Window::width(), Window::height(),
+						 path.c_str());
+	vk::unmap_buffer(output_img_buffer_cpu);
+}
+
+
+void RayTracer::capture_next_output() { capture_output_buffer = true; }
+
 void RayTracer::destroy_accel() {
 	if (tlas.accel) {
 		prm::remove(tlas.buffer);
@@ -507,7 +539,7 @@ void RayTracer::cleanup() {
 		post_fx.destroy();
 		scene.destroy();
 		destroy_accel();
-		vk::destroy_imgui();
+		if (!Window::is_headless()) vk::destroy_imgui();
 		vk::cleanup();
 	}
 }

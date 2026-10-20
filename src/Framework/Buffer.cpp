@@ -59,7 +59,16 @@ void create_buffer(Buffer* buffer, const BufferDesc& desc) {
 		drm::destroy(staging_buffer);
 
 	} else if (desc.data) {
-		memcpy(alloc_info.pMappedData, desc.data, buffer->size);
+		if (alloc_info.pMappedData) {
+			memcpy(alloc_info.pMappedData, desc.data, buffer->size);
+		} else {
+			// Allocation is host-visible but wasn't created with VMA_ALLOCATION_CREATE_MAPPED_BIT
+			// (e.g. CPU_TO_GPU buffers), so map it explicitly instead of assuming a persistent mapping.
+			void* mapped;
+			vk::check(vmaMapMemory(vk::context().allocator, buffer->allocation, &mapped));
+			memcpy(mapped, desc.data, buffer->size);
+			vmaUnmapMemory(vk::context().allocator, buffer->allocation);
+		}
 		vk::check(vmaFlushAllocation(vk::context().allocator, buffer->allocation, 0, buffer->size));
 	}
 }
