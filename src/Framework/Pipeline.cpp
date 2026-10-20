@@ -348,15 +348,7 @@ void Pipeline::cleanup() {
 		vkDestroyDescriptorSetLayout(vk::context().device, set_layout, nullptr);
 	}
 
-	if (tlas_layout) {
-		vkDestroyDescriptorSetLayout(vk::context().device, tlas_layout, nullptr);
-	}
-
 	sbt_wrapper.destroy();
-
-	if (tlas_descriptor_pool) {
-		vkDestroyDescriptorPool(vk::context().device, tlas_descriptor_pool, nullptr);
-	}
 
 	if (update_template) {
 		vkDestroyDescriptorUpdateTemplate(vk::context().device, update_template, nullptr);
@@ -367,20 +359,6 @@ void Pipeline::cleanup() {
 	cv.wait(tracker_lk, [this] { return tracking_stopped; });
 }
 
-
-void Pipeline::create_rt_set_layout(VkShaderStageFlags binding_stage_flags) {
-	VkDescriptorSetLayoutBinding binding = {};
-	binding.binding = 0;
-	binding.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-	binding.descriptorCount = 1;
-	binding.pImmutableSamplers = nullptr;
-	binding.stageFlags = binding_stage_flags;
-	VkDescriptorSetLayoutCreateInfo set_create_info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-	set_create_info.flags = 0;
-	set_create_info.bindingCount = 1;
-	set_create_info.pBindings = &binding;
-	vk::check(vkCreateDescriptorSetLayout(vk::context().device, &set_create_info, nullptr, &tlas_layout));
-}
 
 void Pipeline::create_set_layout(const std::vector<Shader>& shaders, const std::vector<uint32_t>& descriptor_counts) {
 	std::vector<VkDescriptorSetLayoutBinding> set_bindings;
@@ -407,27 +385,30 @@ void Pipeline::create_set_layout(const std::vector<Shader>& shaders, const std::
 		}
 	}
 
+	if (type == PipelineType::RT) {
+		LUMEN_ASSERT(!(binding_mask & (1u << LUMEN_TLAS_BINDING)), "TLAS binding is reserved");
+		VkDescriptorSetLayoutBinding tlas_binding = {};
+		tlas_binding.binding = LUMEN_TLAS_BINDING;
+		tlas_binding.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+		tlas_binding.descriptorCount = 1;
+		for (const Shader& shader : shaders) {
+			tlas_binding.stageFlags |= shader.stage;
+		}
+		set_bindings.push_back(tlas_binding);
+	}
+
 	VkDescriptorSetLayoutCreateInfo set_create_info = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
 	set_create_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
 	set_create_info.bindingCount = uint32_t(set_bindings.size());
 	set_create_info.pBindings = set_bindings.data();
 	vk::check(vkCreateDescriptorSetLayout(vk::context().device, &set_create_info, nullptr, &set_layout));
-	// Create the set layout for TLAS
-	VkShaderStageFlags binding_stage_flags = 0;
-	for (const Shader& shader : shaders) {
-		binding_stage_flags |= shader.stage;
-	}
-	if (type == PipelineType::RT) {
-		create_rt_set_layout(binding_stage_flags);
-	}
 }
 
 void Pipeline::create_pipeline_layout(const std::vector<Shader>& shaders,
 									  const std::vector<uint32_t> push_const_sizes) {
 	VkPipelineLayoutCreateInfo create_info = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-	VkDescriptorSetLayout set_layouts[] = {set_layout, tlas_layout};
-	create_info.setLayoutCount = type == PipelineType::RT ? 2 : 1;
-	create_info.pSetLayouts = set_layouts;
+	create_info.setLayoutCount = 1;
+	create_info.pSetLayouts = &set_layout;
 
 	for (const Shader& shader : shaders)
 		if (shader.uses_push_constants) pc_stages |= shader.stage;

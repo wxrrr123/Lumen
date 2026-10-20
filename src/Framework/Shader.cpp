@@ -391,8 +391,11 @@ static void parse_shader(Shader& shader, const uint32_t* code, size_t code_size,
 	spirv_cross::ShaderResources resources = glsl.get_shader_resources();
 
 	auto reflect = [&shader, &glsl](const spirv_cross::Resource& resource, VkDescriptorType type) {
-		// unsigned set = glsl.get_decoration(resource.id, spv::DecorationDescriptorSet);
+		unsigned set = glsl.get_decoration(resource.id, spv::DecorationDescriptorSet);
 		unsigned binding = glsl.get_decoration(resource.id, spv::DecorationBinding);
+		LUMEN_ASSERT(set == 0, "All descriptors must use set 0");
+		LUMEN_ASSERT(binding < 32 && binding != LUMEN_TLAS_BINDING,
+					 "Binding 16 is reserved for the TLAS");
 		shader.binding_mask |= 1 << binding;
 		shader.descriptor_types[binding] = type;
 	};
@@ -432,7 +435,8 @@ static void parse_shader(Shader& shader, const uint32_t* code, size_t code_size,
 		resources.acceleration_structures[0];
 		auto set = glsl.get_decoration(resources.acceleration_structures[0].id, spv::DecorationDescriptorSet);
 		auto binding = glsl.get_decoration(resources.acceleration_structures[0].id, spv::DecorationBinding);
-		LUMEN_ASSERT(set == 1 && binding == 0, "Make sure the TLAS is bound to set 1, binding 0");
+		LUMEN_ASSERT(set == 0 && binding == LUMEN_TLAS_BINDING,
+					 "Make sure the TLAS is bound to set 0, binding 16");
 	}
 
 	// Input attachments for vertex shader

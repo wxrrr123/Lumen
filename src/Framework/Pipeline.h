@@ -4,6 +4,7 @@
 #include "Texture.h"
 #include "SBTWrapper.h"
 #include "RenderGraphTypes.h"
+#include "../shaders/descriptor_bindings.h"
 
 namespace vk {
 struct Pipeline;
@@ -20,20 +21,12 @@ struct Pipeline {
 	void create_compute_pipeline(const ComputePassSettings& settings, const std::vector<uint32_t>& descriptor_counts);
 	const std::array<VkStridedDeviceAddressRegionKHR, 4> get_rt_regions();
 	void refresh();
-	void create_rt_set_layout(VkShaderStageFlags stage_flags);
 
 	std::unordered_map<std::string, std::filesystem::file_time_type> paths;
 	VkPipeline handle = VK_NULL_HANDLE;
 	VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
 	VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
-	VkDescriptorSetLayout tlas_layout = VK_NULL_HANDLE;
-	/*
-		Potentially 1 descriptor pool for a pass where we have to keep the
-		TLAS descriptor, because we can't push its descriptor with a template as
-		of Vulkan 1.3
-	*/
-	VkDescriptorPool tlas_descriptor_pool = nullptr;
-	VkDescriptorSet tlas_descriptor_set = nullptr;
+	// TLAS is pushed separately into set 0 because update templates cannot carry it.
 	VkWriteDescriptorSetAccelerationStructureKHR tlas_info = {};
 	SBTWrapper sbt_wrapper;
 	PipelineType type;

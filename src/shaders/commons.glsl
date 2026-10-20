@@ -14,7 +14,7 @@ layout(binding = 2) buffer SceneDesc_ { SceneDesc scene_desc; };
 layout(binding = 3, scalar) readonly buffer Lights { Light lights[]; };
 layout(binding = SCENE_TEX_IDX) uniform sampler2D scene_textures[];
 
-layout(set = 1, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = LUMEN_TLAS_BINDING) uniform accelerationStructureEXT tlas;
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer InstanceInfo { PrimMeshInfo d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Materials { Material m[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Indices { uint i[]; };

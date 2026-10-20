@@ -32,7 +32,6 @@ struct PipelineStorage {
 	std::unique_ptr<vk::Pipeline> pipeline;
 	std::vector<ResourceBinding> bound_resources;
 	std::unordered_map<std::string, vk::BufferStatus> affected_buffer_pointers;
-	bool update_as_descriptor = false;
 	bool update_scene_descriptor = false;
 };
 

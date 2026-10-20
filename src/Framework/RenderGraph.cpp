@@ -364,9 +364,6 @@ RenderPass& RenderPass::bind_buffer_array(std::span<vk::Buffer*> buffers, bool f
 }
 
 RenderPass& RenderPass::bind_tlas(const vk::BVH& tlas) {
-	if (is_pipeline_cached) {
-		return *this;
-	}
 	vk::Pipeline* pipeline = pipeline_storage->pipeline.get();
 	LUMEN_ASSERT(type == vk::PassType::RT, "TLAS can only be bound to RT pipelines");
 	pipeline->tlas_info = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
@@ -483,29 +480,6 @@ RenderPass& RenderPass::copy(const Resource& src, const Resource& dst) {
 void RenderPass::finalize() {
 	// Create pipelines/push descriptor templates
 
-	auto update_rt_descriptors = [this]() {
-		auto pool_size = vk::descriptor_pool_size(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1);
-		auto descriptor_pool_ci = vk::descriptor_pool(1, &pool_size, 1);
-
-		vk::check(vkCreateDescriptorPool(vk::context().device, &descriptor_pool_ci, nullptr,
-										 &pipeline_storage->pipeline->tlas_descriptor_pool));
-		assert(pipeline_storage->pipeline->tlas_descriptor_pool != VK_NULL_HANDLE);
-		VkDescriptorSetAllocateInfo set_allocate_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-		set_allocate_info.descriptorPool = pipeline_storage->pipeline->tlas_descriptor_pool;
-		set_allocate_info.descriptorSetCount = 1;
-		set_allocate_info.pSetLayouts = &pipeline_storage->pipeline->tlas_layout;
-		vk::check(vkAllocateDescriptorSets(vk::context().device, &set_allocate_info,
-										   &pipeline_storage->pipeline->tlas_descriptor_set));
-		assert(pipeline_storage->pipeline->tlas_descriptor_set != VK_NULL_HANDLE);
-		// LUMEN_TRACE("Creating TLAS descriptor set {} for pipeline {}",
-		// (uint64_t)pipeline_storage->pipeline->tlas_descriptor_set, (uint64_t)pipeline_storage->pipeline->handle);
-
-		auto descriptor_write = vk::write_descriptor_set(pipeline_storage->pipeline->tlas_descriptor_set,
-														 VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 0,
-														 &pipeline_storage->pipeline->tlas_info);
-		vkUpdateDescriptorSets(vk::context().device, 1, &descriptor_write, 0, nullptr);
-	};
-	bool rebuild_tlas_descriptors = is_pipeline_cached && pipeline_storage->update_as_descriptor;
 	if (!is_pipeline_cached) {
 		switch (type) {
 			case vk::PassType::Graphics: {
@@ -522,16 +496,8 @@ void RenderPass::finalize() {
 				break;
 			}
 			case vk::PassType::RT: {
-				auto func = [update_rt_descriptors](RenderPass* pass) {
+				auto func = [](RenderPass* pass) {
 					pass->pipeline_storage->pipeline->create_rt_pipeline(*pass->rt_settings, pass->descriptor_counts);
-					// Create descriptor pool and sets
-					if (!pass->pipeline_storage->pipeline->tlas_descriptor_pool) {
-						update_rt_descriptors();
-					}
-					auto descriptor_write = vk::write_descriptor_set(
-						pass->pipeline_storage->pipeline->tlas_descriptor_set,
-						VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 0, &pass->pipeline_storage->pipeline->tlas_info);
-					vkUpdateDescriptorSets(vk::context().device, 1, &descriptor_write, 0, nullptr);
 				};
 				if (rg->multithreaded_pipeline_compilation) {
 					rg->pipeline_tasks.push_back({func, pass_idx});
@@ -555,21 +521,6 @@ void RenderPass::finalize() {
 			default:
 				break;
 		}
-	} else if (rebuild_tlas_descriptors) {
-		vkDestroyDescriptorSetLayout(vk::context().device, pipeline_storage->pipeline->tlas_layout, nullptr);
-		vkDestroyDescriptorPool(vk::context().device, pipeline_storage->pipeline->tlas_descriptor_pool, nullptr);
-
-		// Need to retrieve cached shaders' stage flags as we have the temporary shaders in the settings
-		VkShaderStageFlags stage_flags = 0;
-		for (const auto& temp_shader : rt_settings->shaders) {
-			auto find_it = rg->shader_cache.find(temp_shader.name_with_macros);
-			assert(find_it != rg->shader_cache.end());
-			const vk::Shader& shader = find_it->second;
-			stage_flags |= shader.stage;
-		}
-		pipeline_storage->pipeline->create_rt_set_layout(stage_flags);
-		update_rt_descriptors();
-		pipeline_storage->update_as_descriptor = false;
 	}
 }
 
@@ -712,15 +663,17 @@ void RenderPass::run(VkCommandBuffer cmd) {
 	if (!disable_execution) {
 		switch (type) {
 			case vk::PassType::RT: {
-				LUMEN_ASSERT(pipeline_storage->pipeline->tlas_descriptor_set, "TLAS descriptor set cannot be NULL!");
-				// This doesnt work because we can't push TLAS descriptor with
-				// template...
-				// vkCmdPushDescriptorSetWithTemplateKHR(cmd,
-				// pipeline->rt_update_template, pipeline->pipeline_layout, 0,
-				// &tlas_buffer.descriptor);
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
-										pipeline_storage->pipeline->pipeline_layout, 1, 1,
-										&pipeline_storage->pipeline->tlas_descriptor_set, 0, nullptr);
+				const auto& tlas_info = pipeline_storage->pipeline->tlas_info;
+				LUMEN_ASSERT(tlas_info.accelerationStructureCount == 1 && tlas_info.pAccelerationStructures,
+							 "TLAS descriptor must be bound before tracing");
+				VkWriteDescriptorSet tlas_write = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+				tlas_write.pNext = &tlas_info;
+				tlas_write.dstBinding = LUMEN_TLAS_BINDING;
+				tlas_write.descriptorCount = 1;
+				tlas_write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+				// Incremental push preserves the ordinary descriptors already pushed into set 0.
+				vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+										   pipeline_storage->pipeline->pipeline_layout, 0, 1, &tlas_write);
 
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline_storage->pipeline->handle);
 
@@ -1045,11 +998,8 @@ void RenderGraph::destroy() {
 	pipeline_cache.clear();
 }
 
-void RenderGraph::set_pipelines_dirty(bool mark_tlas_dirty, bool mark_scene_dirty) {
+void RenderGraph::set_pipelines_dirty(bool /*mark_tlas_dirty*/, bool mark_scene_dirty) {
 	for (auto& [k, v] : pipeline_cache) {
-		if (v.pipeline->type == vk::Pipeline::PipelineType::RT) {
-			v.update_as_descriptor = mark_tlas_dirty;
-		}
 		v.update_scene_descriptor = mark_scene_dirty;
 	}
 }

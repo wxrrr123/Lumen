@@ -1,5 +1,6 @@
 #ifndef COMMONS_HOST_DEVICE
 #define COMMONS_HOST_DEVICE
+#include "descriptor_bindings.h"
 
 #define INTEGRATOR_PT 0
 #define INTEGRATOR_BDPT 1

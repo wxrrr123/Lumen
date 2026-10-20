@@ -16,7 +16,7 @@ hitAttributeEXT vec2 attribs;
 layout(location = 0) rayPayloadInEXT DDGIVisualizationHitPayload payload;
 
 layout(set = 0, binding = 2, scalar) buffer SceneDesc_ { SphereDesc scene_desc; };
-layout(set = 1, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = LUMEN_TLAS_BINDING) uniform accelerationStructureEXT tlas;
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Vertices { SphereVertex d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Indices { uint i[]; };
 

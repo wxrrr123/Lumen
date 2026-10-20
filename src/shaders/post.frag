@@ -6,7 +6,6 @@
 #extension GL_EXT_debug_printf : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_buffer_reference2 : require
-#extension GL_EXT_shader_atomic_float : require
 #include "commons.h"
 layout(location = 0) in vec2 in_uv;
 layout(location = 0) out vec4 fragColor;

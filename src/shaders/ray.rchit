@@ -15,7 +15,7 @@ hitAttributeEXT vec2 attribs;
 layout(location = 0) rayPayloadInEXT HitPayload payload;
 
 layout(set = 0, binding = 2, scalar) buffer SceneDesc_ { SceneDesc scene_desc; };
-layout(set = 1, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = LUMEN_TLAS_BINDING) uniform accelerationStructureEXT tlas;
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer InstanceInfo { PrimMeshInfo prim_info[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer CompactVertices { Vertex d[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 4) readonly buffer Indices { uint i[]; };
