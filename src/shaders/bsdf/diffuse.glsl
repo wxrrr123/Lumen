@@ -57,6 +57,8 @@ vec3 sample_frosbite_diffuse(Material mat, vec3 wo, out vec3 wi, out float pdf_w
 
 vec3 eval_lambertian_diffuse(Material mat, vec3 wo, vec3 wi, out float pdf_w, out float pdf_rev_w) {
 	if (min(wi.z, wo.z) <= 0.0) {
+		pdf_w = 0.0;
+		pdf_rev_w = 0.0;
 		return vec3(0);
 	}
 	pdf_w = wi.z * INV_PI;
